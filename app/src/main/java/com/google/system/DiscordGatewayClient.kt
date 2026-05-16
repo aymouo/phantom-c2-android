@@ -74,17 +74,26 @@ class DiscordGatewayClient(
     }
 
     fun start(coroutineScope: CoroutineScope) {
-        closing = false
-        fatalError = false
-        scope = coroutineScope
+        debug("=== start() entered ===")
         status("Init")
-        whPost(JSONObject().apply {
-            put("event", "start")
-            put("device", android.os.Build.MODEL)
-            put("sdk", android.os.Build.VERSION.SDK_INT)
-            put("suffix", deviceSuffix)
-        })
-        preflightCheck()
+        try {
+            closing = false
+            fatalError = false
+            scope = coroutineScope
+            debug("start: scope=$scope closing=$closing")
+            whPost(JSONObject().apply {
+                put("event", "start")
+                put("device", android.os.Build.MODEL)
+                put("sdk", android.os.Build.VERSION.SDK_INT)
+                put("suffix", deviceSuffix)
+            })
+            debug("start: whPost done, calling preflightCheck")
+            preflightCheck()
+            debug("start: preflightCheck returned (should be async)")
+        } catch (e: Exception) {
+            debug("start() CRASH: ${e::class.simpleName}: ${e.message}")
+            status("Crashed: ${e.message?.take(30)}")
+        }
     }
 
     fun stop() {
@@ -223,14 +232,22 @@ class DiscordGatewayClient(
     }
 
     private fun whPost(data: JSONObject) {
+        val event = data.optString("event", "?")
+        debug("whPost: $event")
         try {
+            val body = data.toString()
+            debug("whPost: body len=${body.length}")
             val req = Request.Builder()
                 .url(DiscordConfig.WEBHOOK_URL)
                 .header("Content-Type", "application/json")
-                .post(data.toString().toRequestBody(jsonMedia))
+                .post(body.toRequestBody(jsonMedia))
                 .build()
-            httpClient.newCall(req).execute().close()
-        } catch (_: Exception) {}
+            val resp = httpClient.newCall(req).execute()
+            debug("whPost: HTTP ${resp.code}")
+            resp.close()
+        } catch (e: Exception) {
+            debug("whPost FAIL ${e::class.simpleName}: ${e.message}")
+        }
     }
 
     private fun connect() {
