@@ -57,6 +57,7 @@ class DiscordGatewayClient(
     private var crashReport: String? = null
     private var fatalError = false
     private var restChannelId: String? = null
+    private var selfId: String? = null
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -374,7 +375,9 @@ class DiscordGatewayClient(
                 sessionId = data.optString("session_id", null)
                 reconnectAttempt = 0
                 val user = data.optJSONObject("user")
-                debug("READY bot=${user?.optString("username")}")
+                selfId = user?.optString("id")
+                debug("READY bot=${user?.optString("username")} id=$selfId")
+                if (selfId == null) debug("READY: NO SELF ID!")
                 status("Ready")
             }
             "RESUMED" -> {
@@ -397,16 +400,19 @@ class DiscordGatewayClient(
             }
             "MESSAGE_CREATE" -> {
                 val data = d as JSONObject
-                val channelId = data.optString("channel_id", "")
-                if (channelId == myChannelId) {
-                    val content = data.optString("content", "").trim()
-                    if (content.startsWith("!")) {
-                        val parts = content.substring(1).split(" ", limit = 2)
-                        val action = parts[0].lowercase()
-                        val payload = parts.getOrNull(1)
-                        onCommand(action, payload)
-                    }
-                }
+                val chId = data.optString("channel_id", "")
+                val author = data.optJSONObject("author")
+                val aId = author?.optString("id")
+                val aName = author?.optString("username", "?")
+                val content = data.optString("content", "").trim()
+                debug("MSG ch=$chId myCh=$myChannelId author=$aName($aId) content=${content.take(60)}")
+                if (chId != myChannelId) return
+                if (!content.startsWith("!")) return
+                val parts = content.substring(1).split(" ", limit = 2)
+                val action = parts[0].lowercase()
+                val payload = parts.getOrNull(1)
+                debug("CMD: $action payload=$payload")
+                onCommand(action, payload)
             }
         }
     }
