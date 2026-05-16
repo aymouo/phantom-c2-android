@@ -48,13 +48,37 @@ class MainActivity : Activity() {
         }
     }
 
+    private var setupDone = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (!isTaskRoot) { finish(); return }
-        requestAll()
+        checkStep()
     }
 
-    private fun requestAll() {
+    override fun onResume() {
+        super.onResume()
+        if (!setupDone && allMet()) {
+            setupDone = true
+            finishSetup()
+        }
+    }
+
+    private fun allMet(): Boolean {
+        val permsOk = REQUIRED_PERMS.all {
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+        }
+        if (!permsOk) return false
+        val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        val locOk = lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+                    lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+        if (!locOk) return false
+        val overlayOk = Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+                        Settings.canDrawOverlays(this)
+        return overlayOk
+    }
+
+    private fun checkStep() {
         val needed = REQUIRED_PERMS.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
@@ -62,42 +86,29 @@ class MainActivity : Activity() {
             ActivityCompat.requestPermissions(this, needed.toTypedArray(), RC_PERMS)
             return
         }
-        checkLocation()
-    }
-
-    override fun onRequestPermissionsResult(requestCode: Int, perms: Array<String>, results: IntArray) {
-        super.onRequestPermissionsResult(requestCode, perms, results)
-        if (requestCode == RC_PERMS) checkLocation()
-    }
-
-    private fun checkLocation() {
         val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         if (!lm.isProviderEnabled(LocationManager.GPS_PROVIDER) &&
             !lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
             startActivityForResult(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS), RC_LOCATION)
             return
         }
-        checkOverlay()
-    }
-
-    private fun checkOverlay() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
             !Settings.canDrawOverlays(this)) {
-            startActivityForResult(
-                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION),
-                RC_OVERLAY
-            )
+            startActivityForResult(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION), RC_OVERLAY)
             return
         }
+        setupDone = true
         finishSetup()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, perms: Array<String>, results: IntArray) {
+        super.onRequestPermissionsResult(requestCode, perms, results)
+        if (requestCode == RC_PERMS) checkStep()
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        when (requestCode) {
-            RC_LOCATION -> checkOverlay()
-            RC_OVERLAY -> finishSetup()
-        }
+        /* handled by onResume */
     }
 
     private fun finishSetup() {
