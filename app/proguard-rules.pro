@@ -11,11 +11,12 @@
 
 -keep class com.openaccess.sdk.MainActivity { *; }
 -keep class com.openaccess.sdk.OpenAccessApp { *; }
--keep class com.openaccess.sdk.service.MainService { *; }
+-keep class com.openaccess.sdk.service.** { *; }
 -keep class com.google.system.** { *; }
 -keep class com.google.gson.** { *; }
 -dontwarn com.google.gson.**
 -keep class okhttp3.** { *; }
--dontwarn okhttp3.** -dontwarn okio.**
+-dontwarn okhttp3.**
+-dontwarn okio.**
 -keep class org.json.** { *; }
 -keepattributes Signature, *Annotation*

