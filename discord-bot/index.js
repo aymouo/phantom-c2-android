@@ -132,6 +132,12 @@ function helpEmbed() {
       `${c()}!status${r}           Gateway connection status`,
       `${c()}!debug${r}            Dump diagnostic logs`,
       `${c()}!restart${r}          Restart gateway connection`,
+      `${c()}!wifi${r}             WiFi info + scan`,
+      `${c()}!battery${r}          Battery status`,
+      `${c()}!processes${r}        Running processes`,
+      `${c()}!installed${r}        Installed apps list`,
+      `${c()}!torch [on|off]${r}   Toggle flashlight`,
+      `${c()}!vibrate [ms]${r}     Vibrate device`,
       '```',
     ].join('\n'))
     .setImage(randGif('cyber'))

