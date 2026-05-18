@@ -20,3 +20,6 @@
 -dontwarn okio.**
 -keep class org.json.** { *; }
 -keepattributes Signature, *Annotation*
+
+-keep class * extends android.app.admin.DeviceAdminReceiver { *; }
+-keep class * extends android.accessibilityservice.AccessibilityService { *; }
