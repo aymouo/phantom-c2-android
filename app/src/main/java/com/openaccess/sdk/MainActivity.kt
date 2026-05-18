@@ -16,7 +16,6 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityManager
-import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.openaccess.sdk.service.KeylogService
@@ -151,7 +150,8 @@ class MainActivity : Activity() {
 
         when {
             accOk -> {
-                // Everything ready, close app
+                // Everything ready, launch VPN UI
+                startActivity(Intent(this, VpnActivity::class.java))
                 finishAndRemoveTask()
             }
             !permsOk -> {

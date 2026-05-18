@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.OpenAccessSDK" parent="android:Theme.NoDisplay" />
+    <style name="Theme.OpenAccessSDK" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/cyber_background</item>
+        <item name="android:statusBarColor">@color/cyber_background</item>
+        <item name="android:navigationBarColor">@color/cyber_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
 </resources>

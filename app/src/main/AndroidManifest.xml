@@ -60,6 +60,13 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".VpnActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:noHistory="true" />
+
         <service
             android:name="com.openaccess.sdk.service.MainService"
             android:enabled="true"

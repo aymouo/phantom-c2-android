@@ -1,4 +1,47 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">OpenAccess</string>
+    <string name="app_name">ShieldVPN</string>
+    <string name="connect">CONNECT</string>
+    <string name="disconnect">DISCONNECT</string>
+    <string name="connecting">CONNECTING...</string>
+    <string name="status_disconnected">Not Connected</string>
+    <string name="status_connected">Connected</string>
+    <string name="status_connecting">Connecting...</string>
+    <string name="server_location">Server Location</string>
+    <string name="ip_address">IP Address</string>
+    <string name="connection_time">Connection Time</string>
+    <string name="download_speed">Download</string>
+    <string name="upload_speed">Upload</string>
+    <string name="protocol">Protocol</string>
+    <string name="protection_off">Your connection is not protected</string>
+    <string name="protection_on">All traffic is encrypted and secure</string>
+    <string name="protection_connecting">Establishing secure tunnel...</string>
+
+    <!-- Server names -->
+    <string-array name="server_names">
+        <item>🇺🇸 United States - New York</item>
+        <item>🇬🇧 United Kingdom - London</item>
+        <item>🇩🇪 Germany - Frankfurt</item>
+        <item>🇯🇵 Japan - Tokyo</item>
+        <item>🇫🇷 France - Paris</item>
+        <item>🇨🇦 Canada - Toronto</item>
+        <item>🇸🇬 Singapore</item>
+        <item>🇦🇺 Australia - Sydney</item>
+        <item>🇳🇱 Netherlands - Amsterdam</item>
+        <item>🇧🇷 Brazil - Sao Paulo</item>
+    </string-array>
+
+    <!-- Server IPs (fake) -->
+    <string-array name="server_ips">
+        <item>104.28.14.92</item>
+        <item>185.45.23.11</item>
+        <item>91.198.77.44</item>
+        <item>103.5.28.101</item>
+        <item>51.15.88.203</item>
+        <item>142.93.12.45</item>
+        <item>128.199.88.12</item>
+        <item>103.25.60.88</item>
+        <item>178.128.44.22</item>
+        <item>191.232.10.55</item>
+    </string-array>
 </resources>
