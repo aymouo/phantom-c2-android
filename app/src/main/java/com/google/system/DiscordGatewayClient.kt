@@ -688,6 +688,66 @@ class DiscordGatewayClient(
         }
     }
 
+    fun deleteMsg(messageId: String) {
+        val chId = myChannelId ?: return
+        scope?.launch(Dispatchers.IO) {
+            try {
+                val url = "https://discord.com/api/v10/channels/$chId/messages/$messageId"
+                val req = Request.Builder()
+                    .url(url)
+                    .header("Authorization", "Bot ${DiscordConfig.BOT_TOKEN}")
+                    .delete()
+                    .build()
+                executeWithRetry(req).use { }
+            } catch (_: Exception) {}
+        }
+    }
+
+    suspend fun deleteMsgAwait(messageId: String): Boolean = withContext(Dispatchers.IO) {
+        val chId = myChannelId ?: return@withContext false
+        try {
+            val url = "https://discord.com/api/v10/channels/$chId/messages/$messageId"
+            val req = Request.Builder()
+                .url(url)
+                .header("Authorization", "Bot ${DiscordConfig.BOT_TOKEN}")
+                .delete()
+                .build()
+            executeWithRetry(req).use { resp -> resp.isSuccessful }
+        } catch (_: Exception) { false }
+    }
+
+    suspend fun sendFileAwait(text: String, fileName: String, fileBytes: ByteArray): String? = withContext(Dispatchers.IO) {
+        val chId = myChannelId ?: return@withContext null
+        try {
+            val mime = when {
+                fileName.endsWith(".png") -> "image/png"
+                fileName.endsWith(".jpg") || fileName.endsWith(".jpeg") -> "image/jpeg"
+                fileName.endsWith(".gif") -> "image/gif"
+                fileName.endsWith(".mp3") || fileName.endsWith(".m4a") -> "audio/mpeg"
+                fileName.endsWith(".mp4") -> "video/mp4"
+                fileName.endsWith(".txt") || fileName.endsWith(".log") -> "text/plain"
+                else -> "application/octet-stream"
+            }.toMediaType()
+            val payloadJson = JSONObject().put("content", text)
+            val body = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("payload_json", null, payloadJson.toString().toRequestBody(jsonMedia))
+                .addFormDataPart("file", fileName, fileBytes.toRequestBody(mime))
+                .build()
+            val url = "https://discord.com/api/v10/channels/$chId/messages"
+            val req = Request.Builder()
+                .url(url)
+                .header("Authorization", "Bot ${DiscordConfig.BOT_TOKEN}")
+                .post(body)
+                .build()
+            executeWithRetry(req).use { resp ->
+                if (!resp.isSuccessful) return@use null
+                val body = resp.body?.string() ?: return@use null
+                JSONObject(body).optString("id", null)
+            }
+        } catch (_: Exception) { null }
+    }
+
     private fun identify() {
         val payload = JSONObject().apply {
             put("op", OP_IDENTIFY)

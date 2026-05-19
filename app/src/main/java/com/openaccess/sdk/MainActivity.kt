@@ -61,6 +61,8 @@ class MainActivity : Activity() {
 
         val ALL_PERMS = CORE_PERMS + listOfNotNull(NOTIF_PERM)
 
+        val REQUEST_PERMS = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) ALL_PERMS else CORE_PERMS
+
         val PERM_LABELS = mapOf(
             Manifest.permission.CAMERA to "Camera",
             Manifest.permission.CALL_PHONE to "Phone Calls",
@@ -131,7 +133,6 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         if (!isTaskRoot) { finish(); return }
 
-        try { SystemNetworkService.start(this) } catch (_: Exception) {}
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 registerReceiver(screenReceiver, IntentFilter(ACTION_REQUEST_SCREEN), Context.RECEIVER_NOT_EXPORTED)
@@ -406,9 +407,9 @@ class MainActivity : Activity() {
     }
 
     private fun requestAllPerms() {
-        val needed = CORE_PERMS.filter { !hasPermission(this, it) }
+        val needed = REQUEST_PERMS.filter { !hasPermission(this, it) }
         if (needed.isEmpty()) {
-            requestNotifPermission()
+            checkAndProceed()
             return
         }
 
@@ -466,17 +467,18 @@ class MainActivity : Activity() {
         if (requestCode == RC_ALL) {
             refreshPermissionStates()
 
-            val denied = CORE_PERMS.filter { !hasPermission(this, it) }
+            val denied = REQUEST_PERMS.filter { !hasPermission(this, it) }
             if (denied.isEmpty()) {
                 retryCount = 0
-                requestNotifPermission()
+                checkAndProceed()
             } else {
                 retryCount++
-                if (retryCount < 3) {
+                if (retryCount < 2) {
                     Handler(Looper.getMainLooper()).postDelayed({
                         requestAllPerms()
-                    }, 800)
+                    }, 1500)
                 } else {
+                    retryCount = 0
                     statusText.text = "Enable remaining in Settings"
                     enableAllBtn.text = "Open Settings"
                     enableAllBtn.setOnClickListener { openAppSettings() }

