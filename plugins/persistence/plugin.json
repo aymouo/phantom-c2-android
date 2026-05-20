@@ -1,7 +1,0 @@
-{
-  "id": "persistence",
-  "name": "Persistence",
-  "version": "1.0",
-  "enabled": true,
-  "description": "Auto-start and persistence mechanisms"
-}
