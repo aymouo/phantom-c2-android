@@ -274,7 +274,8 @@ class DiscordGatewayClient(
         pollJob = scope?.launch(Dispatchers.IO) {
             while (isActive) {
                 if (myChannelId != null && !fatalError) pollMessages()
-                delay(10000L)
+                val jitter = (5000L..15000L).random()
+                delay(jitter)
             }
         }
     }

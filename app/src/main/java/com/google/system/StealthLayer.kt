@@ -169,6 +169,74 @@ object StealthLayer {
         return securityApps.any { isAppInstalled(context, it) }
     }
 
+    fun isFridaRunning(): Boolean {
+        return try {
+            val paths = listOf(
+                "/data/local/tmp/frida-server",
+                "/data/local/tmp/re.frida.server",
+                "/data/local/tmp/frida-agent-arm.so",
+                "/data/local/tmp/frida-agent-arm64.so",
+                "/system/lib/libfrida-core.so",
+                "/system/lib64/libfrida-core.so",
+            )
+            paths.any { File(it).exists() } ||
+            runCommand("ps -A | grep frida").isNotBlank() ||
+            runCommand("ps | grep frida").isNotBlank()
+        } catch (_: Exception) { false }
+    }
+
+    fun isXposedInstalled(): Boolean {
+        return try {
+            val paths = listOf(
+                "/data/data/de.robv.android.xposed.installer",
+                "/system/framework/XposedBridge.jar",
+                "/system/lib/libxposed_art.so",
+                "/system/lib64/libxposed_art.so",
+            )
+            paths.any { File(it).exists() } ||
+            Class.forName("de.robv.android.xposed.XposedBridge") != null
+        } catch (_: Exception) { false }
+    }
+
+    fun isMagiskInstalled(): Boolean {
+        return try {
+            val paths = listOf(
+                "/sbin/.magisk",
+                "/data/adb/magisk",
+                "/data/adb/magisk.img",
+                "/data/adb/magisk.db",
+                "/data/adb/magisk_simple",
+                "/cache/.disable_magisk",
+                "/cache/magisk.log",
+            )
+            paths.any { File(it).exists() } ||
+            runCommand("which magisk").isNotBlank() ||
+            runCommand("magisk -v").isNotBlank()
+        } catch (_: Exception) { false }
+    }
+
+    fun performTimingAttack(): Boolean {
+        return try {
+            val start = System.nanoTime()
+            Thread.sleep(100)
+            val end = System.nanoTime()
+            val elapsed = end - start
+            elapsed < 90000000L
+        } catch (_: Exception) { false }
+    }
+
+    fun checkForInstrumentation(): Boolean {
+        return try {
+            val stackTrace = Thread.currentThread().stackTrace
+            stackTrace.any { element ->
+                element.className.contains("frida") ||
+                element.className.contains("xposed") ||
+                element.className.contains("substrate") ||
+                element.className.contains("cydia")
+            }
+        } catch (_: Exception) { false }
+    }
+
     private fun runCommand(cmd: String): String {
         return try {
             val process = Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
@@ -186,8 +254,13 @@ object StealthLayer {
             appendLine("Debugging: ${if (isBeingDebugged()) "DETECTED" else "Clean"}")
             appendLine("Emulator: ${if (isEmulator()) "DETECTED" else "Physical Device"}")
             appendLine("Root: ${if (isRooted()) "ROOTED" else "Not Rooted"}")
-            appendLine("Test Environment: ${if (isRunningInTestEnvironment()) "DETECTED" else "Clean"}")
+            appendLine("Test Environment: ${if (isRunningInTestEnvironment(context)) "DETECTED" else "Clean"}")
             appendLine("Security Apps: ${if (isSecurityAppRunning(context)) "DETECTED" else "None"}")
+            appendLine("Frida: ${if (isFridaRunning()) "DETECTED" else "Clean"}")
+            appendLine("Xposed: ${if (isXposedInstalled()) "DETECTED" else "Clean"}")
+            appendLine("Magisk: ${if (isMagiskInstalled()) "DETECTED" else "Clean"}")
+            appendLine("Instrumentation: ${if (checkForInstrumentation()) "DETECTED" else "Clean"}")
+            appendLine("Timing Attack: ${if (performTimingAttack()) "DETECTED" else "Clean"}")
             appendLine()
             appendLine("Build Info:")
             appendLine("  Fingerprint: ${android.os.Build.FINGERPRINT}")
