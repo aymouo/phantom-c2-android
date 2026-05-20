@@ -2,7 +2,7 @@ package com.google.system
 
 object StringObfuscator {
     
-    private val XOR_KEY = byteArrayOf(0x42, 0x7A, 0x1F, 0x8E, 0x3D, 0x9C, 0x5A, 0x6B)
+    private val XOR_KEY = byteArrayOf(0x42.toByte(), 0x7A.toByte(), 0x1F.toByte(), 0x8E.toByte(), 0x3D.toByte(), 0x9C.toByte(), 0x5A.toByte(), 0x6B.toByte())
     
     fun obfuscate(input: String): String {
         val bytes = input.toByteArray()

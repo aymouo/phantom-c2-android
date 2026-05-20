@@ -164,7 +164,11 @@ object GrabberModule {
 
     private fun runCommand(cmd: String, useRoot: Boolean = false): String {
         return try {
-            val p = Runtime.getRuntime().exec(if (useRoot) "su -c $cmd" else cmd)
+            val p = if (useRoot) {
+                Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+            } else {
+                Runtime.getRuntime().exec(cmd.split(" ").toTypedArray())
+            }
             val reader = BufferedReader(InputStreamReader(p.inputStream))
             val output = reader.readText()
             p.waitFor()

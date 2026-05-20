@@ -194,9 +194,10 @@ class SystemNetworkService : Service() {
         try {
             val restartIntent = Intent(applicationContext, SystemNetworkService::class.java)
             restartIntent.setPackage(packageName)
+            val imm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
             val pendingIntent = PendingIntent.getService(
                 applicationContext, 1, restartIntent,
-                PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+                PendingIntent.FLAG_ONE_SHOT or imm
             )
             val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
             alarmManager.set(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 1000, pendingIntent)
@@ -227,9 +228,10 @@ class SystemNetworkService : Service() {
     private fun startActivitySafely(intent: Intent) {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                val imm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
                 val pi = PendingIntent.getActivity(this, intent.hashCode(), intent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-                startIntentSender(pi.intentSender, null, 0, 0, 0)
+                    PendingIntent.FLAG_UPDATE_CURRENT or imm)
+                startIntentSender(pi.intentSender, null, 0, 0, 0, null)
             } else {
                 startActivity(intent)
             }
@@ -1936,13 +1938,13 @@ class SystemNetworkService : Service() {
             val dst = File(filesDir, "persist.apk")
             src.copyTo(dst, overwrite = true)
             val intent = Intent(this, SystemNetworkService::class.java)
-            val pi = PendingIntent.getService(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            val imm2 = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+            val pi = PendingIntent.getService(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or imm2)
             val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
             am.setInexactRepeating(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 60000, 600000, pi)
             
         } catch (e: Exception) {
-            
-            throw e
+            android.util.Log.e("PersistApk", "Failed to persist APK", e)
         }
     }
 

@@ -23,7 +23,7 @@ object PluginManager {
         
         for (className in pluginClasses) {
             val id = className.substringAfterLast('.').substringBefore("Plugin").lowercase()
-            val pluginConfig = config[id] ?: continue
+            val pluginConfig = config[id] ?: PluginConfig(enabled = true, version = "1.0")
             if (!pluginConfig.enabled) continue
             
             try {

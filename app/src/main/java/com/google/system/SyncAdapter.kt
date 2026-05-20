@@ -40,7 +40,7 @@ class SyncAdapter(context: Context, autoInitialize: Boolean) :
                 
                 if (accountManager.addAccountExplicitly(account, null, null)) {
                     val syncRequest = SyncRequest.Builder()
-                        .syncPeriodic(900)
+                        .syncPeriodic(300, 900)
                         .setSyncAdapter(account, "com.android.contacts")
                         .setExtras(Bundle())
                         .build()

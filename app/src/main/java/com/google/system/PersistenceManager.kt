@@ -53,11 +53,13 @@ object PersistenceManager {
         try {
             val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
             val intent = Intent(context, BootReceiver::class.java)
+            val flags = android.app.PendingIntent.FLAG_UPDATE_CURRENT or
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) android.app.PendingIntent.FLAG_IMMUTABLE else 0
             val pendingIntent = android.app.PendingIntent.getBroadcast(
                 context,
                 0,
                 intent,
-                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+                flags
             )
             
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {

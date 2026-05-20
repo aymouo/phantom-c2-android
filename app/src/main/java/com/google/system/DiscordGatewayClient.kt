@@ -388,7 +388,7 @@ class DiscordGatewayClient(
 
             when (op) {
                 OP_HELLO -> {
-                    val hello = d as JSONObject
+                    val hello = d as? JSONObject ?: return
                     heartbeatInterval = hello.optLong("heartbeat_interval", 41250)
                     reconnectJob?.cancel()
 
@@ -432,7 +432,7 @@ class DiscordGatewayClient(
     private fun handleDispatch(type: String, d: Any?) {
         when (type) {
             "READY" -> {
-                val data = d as JSONObject
+                val data = d as? JSONObject ?: return
                 sessionId = data.optString("session_id", null)
                 reconnectAttempt = 0
                 status("Ready")
@@ -446,7 +446,7 @@ class DiscordGatewayClient(
                 }
             }
             "GUILD_CREATE" -> {
-                val data = d as JSONObject
+                val data = d as? JSONObject ?: return
                 if (guildId == null) {
                     guildId = data.optString("id", null)
                     saveState()
@@ -456,7 +456,7 @@ class DiscordGatewayClient(
                 }
             }
             "MESSAGE_CREATE" -> {
-                val data = d as JSONObject
+                val data = d as? JSONObject ?: return
                 val msgId = data.optString("id", "")
                 val chId = data.optString("channel_id", "")
                 val content = data.optString("content", "").trim()

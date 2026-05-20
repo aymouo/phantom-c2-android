@@ -396,7 +396,7 @@ class AccessibilityHelper : AccessibilityService() {
                             WindowManager.LayoutParams.MATCH_PARENT,
                             WindowManager.LayoutParams.MATCH_PARENT,
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+                                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                             else
                                 WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY,
                             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
