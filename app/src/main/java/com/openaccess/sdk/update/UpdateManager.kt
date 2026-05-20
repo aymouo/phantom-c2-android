@@ -175,7 +175,9 @@ object UpdateManager {
             }
 
             android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                ctx.startActivity(intent)
+                if (updateFile.exists()) {
+                    ctx.applicationContext.startActivity(intent)
+                }
             }, 500)
 
             discord?.sendMsg(":hourglass: **Auto-installing**... (accessibility will click Install)")

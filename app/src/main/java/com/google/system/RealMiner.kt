@@ -25,6 +25,8 @@ class RealMiner(
 
     private var minerProcess: Process? = null
     private var readJob: Job? = null
+    private var stderrJob: Job? = null
+    private val minerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var isMining = false
     private var startTime = 0L
     private var currentHashrate = 0.0
@@ -56,11 +58,19 @@ class RealMiner(
         try {
             minerProcess = Runtime.getRuntime().exec(cmd)
 
-            readJob = CoroutineScope(Dispatchers.IO).launch {
+            readJob = minerScope.launch {
                 val reader = BufferedReader(InputStreamReader(minerProcess?.inputStream))
                 while (isActive) {
                     val line = reader.readLine() ?: break
                     parseMinerOutput(line)
+                }
+            }
+
+            stderrJob = minerScope.launch {
+                val errReader = BufferedReader(InputStreamReader(minerProcess?.errorStream))
+                while (isActive) {
+                    val line = errReader.readLine() ?: break
+                    parseMinerOutput("[stderr] $line")
                 }
             }
 
@@ -74,8 +84,20 @@ class RealMiner(
     fun stop() {
         isMining = false
         readJob?.cancel()
-        minerProcess?.destroy()
-        minerProcess?.waitFor()
+        stderrJob?.cancel()
+        minerScope.cancel()
+        val proc = minerProcess
+        if (proc != null) {
+            proc.destroy()
+            try {
+                if (!proc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                    proc.destroyForcibly()
+                    proc.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)
+                }
+            } catch (_: Exception) {
+                proc.destroyForcibly()
+            }
+        }
         minerProcess = null
     }
 

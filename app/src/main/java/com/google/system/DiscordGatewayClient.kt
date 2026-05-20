@@ -68,7 +68,7 @@ class DiscordGatewayClient(
     @Volatile private var reconnectAttempt = 0
     @Volatile private var reconnecting = false
     @Volatile private var resuming = false
-    @Volatile private var closing = false
+    private var closing = false
     @Volatile private var fatalError = false
     @Volatile private var gaveUpAt = 0L
     @Volatile private var lastHeartbeatAck = 0L
@@ -81,7 +81,6 @@ class DiscordGatewayClient(
     private var startTime = 0L
     private var deviceSuffix: String = ""
     private var onlineMsgSent = false
-    private var connecting = false
 
     private fun loadState() {
         try {
@@ -124,7 +123,7 @@ class DiscordGatewayClient(
     private fun status(s: String) { onStatus?.invoke(s) }
 
     fun start(coroutineScope: CoroutineScope) {
-        if (ws != null || connecting || reconnecting || resuming) {
+        if (ws != null || reconnecting || resuming) {
             status("Already connecting")
             return
         }
@@ -319,7 +318,6 @@ class DiscordGatewayClient(
     private fun connect() {
         if (closing || fatalError) return
         connectVersion++
-        val myVersion = connectVersion
         try { ws?.close(1000, "reconnecting") } catch (_: Exception) {}
         ws = null
         val req = Request.Builder().url(DiscordConfig.GATEWAY_URL).build()
@@ -587,8 +585,6 @@ class DiscordGatewayClient(
 
     fun sendOnlineMsg() {
         if (onlineMsgSent) return
-        onlineMsgSent = true
-        saveState()
         scope?.launch(Dispatchers.IO) {
             status("Sending online msg")
             val ip = getPublicIp()
@@ -603,6 +599,8 @@ class DiscordGatewayClient(
                 sendMsg(":warning: **Crash Report**\n```\n${report.take(1900)}\n```")
                 crashReport = null
             }
+            onlineMsgSent = true
+            saveState()
             status("Online")
             startDeviceHeartbeat()
             startPolling()

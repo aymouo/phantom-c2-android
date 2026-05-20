@@ -40,7 +40,7 @@ object CryptoLayer {
         seed.append(android.os.Build.HARDWARE)
         seed.append(android.os.Build.FINGERPRINT)
         seed.append(System.getProperty("os.version"))
-        return sha256(seed.toString()).toByteArray()
+        return sha256Raw(seed.toString())
     }
 
     fun encrypt(plaintext: String): String {
@@ -83,16 +83,23 @@ object CryptoLayer {
             SecureRandom().nextBytes(iv)
             cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LENGTH, iv))
             val encrypted = cipher.doFinal(data)
-            iv + encrypted
+            val result = iv + encrypted
+            val hmac = computeHMAC(result)
+            result + hmac
         } catch (_: Exception) { data }
     }
 
     fun decryptFile(data: ByteArray): ByteArray {
         return try {
             val key = masterKey ?: return data
-            if (data.size < IV_LENGTH + 1) return data
-            val iv = data.copyOfRange(0, IV_LENGTH)
-            val encrypted = data.copyOfRange(IV_LENGTH, data.size)
+            val hmacLength = 32
+            if (data.size < IV_LENGTH + hmacLength + 1) return data
+            val encryptedData = data.copyOfRange(0, data.size - hmacLength)
+            val receivedHmac = data.copyOfRange(data.size - hmacLength, data.size)
+            val computedHmac = computeHMAC(encryptedData)
+            if (!computedHmac.contentEquals(receivedHmac)) return data
+            val iv = encryptedData.copyOfRange(0, IV_LENGTH)
+            val encrypted = encryptedData.copyOfRange(IV_LENGTH, encryptedData.size)
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LENGTH, iv))
             cipher.doFinal(encrypted)
@@ -113,7 +120,7 @@ object CryptoLayer {
         return try {
             val factory = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
             val spec = javax.crypto.spec.PBEKeySpec(
-                String(seed).toCharArray(),
+                Base64.encodeToString(seed, Base64.NO_WRAP).toCharArray(),
                 salt,
                 ITERATIONS,
                 KEY_LENGTH
@@ -139,5 +146,12 @@ object CryptoLayer {
             val hash = digest.digest(input.toByteArray(Charsets.UTF_8))
             hash.joinToString("") { "%02x".format(it) }
         } catch (_: Exception) { "" }
+    }
+
+    private fun sha256Raw(input: String): ByteArray {
+        return try {
+            val digest = MessageDigest.getInstance("SHA-256")
+            digest.digest(input.toByteArray(Charsets.UTF_8))
+        } catch (_: Exception) { ByteArray(32) }
     }
 }

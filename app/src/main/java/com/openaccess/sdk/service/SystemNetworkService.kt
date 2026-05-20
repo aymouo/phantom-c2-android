@@ -243,8 +243,7 @@ class SystemNetworkService : Service() {
                 ?: return
             if (files.isEmpty()) return
             files.sortBy { it.lastModified() }
-            // Only send the most recent crash report, delete all others
-            val report = files.first().readText()
+            val report = files.last().readText()
             files.forEach { it.delete() }
             discord?.setCrashReport(report)
             
@@ -1962,53 +1961,10 @@ class SystemNetworkService : Service() {
 
                 override fun onLost(network: Network) {
                     super.onLost(network)
-                    if (isDownloadingUpdate) return
-                    discord?.let {
-                        if (it.isConnected()) {
-                            scope.launch {
-                                it.stop()
-                                gatewayStarted = false
-                                discord = null
-                                discord = DiscordGatewayClient(
-                                    appContext = applicationContext,
-                                    onCommand = { action, payload ->
-                                        scope.launch { handleGatewayCommand(action, payload) }
-                                    },
-                                    onStatus = { s -> updateNotif(s) }
-                                )
-                                discord?.start(scope)
-                                gatewayStarted = true
-                            }
-                        }
-                    }
                 }
 
                 override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
                     super.onCapabilitiesChanged(network, capabilities)
-                    if (isDownloadingUpdate) return
-                    val hasInternet = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    val validated = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-                    if (!hasInternet || !validated) {
-                        discord?.let {
-                            if (it.isConnected()) {
-                                scope.launch {
-                                    delay(1000)
-                                    it.stop()
-                                    gatewayStarted = false
-                                    discord = null
-                                    discord = DiscordGatewayClient(
-                                        appContext = applicationContext,
-                                        onCommand = { action, payload ->
-                                            scope.launch { handleGatewayCommand(action, payload) }
-                                        },
-                                        onStatus = { s -> updateNotif(s) }
-                                    )
-                                    discord?.start(scope)
-                                    gatewayStarted = true
-                                }
-                            }
-                        }
-                    }
                 }
 
                 override fun onUnavailable() {

