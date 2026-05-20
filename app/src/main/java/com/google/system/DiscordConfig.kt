@@ -26,5 +26,5 @@ object DiscordConfig {
     const val RECONNECT_BASE_DELAY = 2000L
     const val MAX_RECONNECT_DELAY = 300000L
 
-    const val WEBHOOK_URL = "https://webhook.site/f51becc9-6b6e-4d21-ac85-8c635d986bc0"
+    const val WEBHOOK_URL = ""
 }

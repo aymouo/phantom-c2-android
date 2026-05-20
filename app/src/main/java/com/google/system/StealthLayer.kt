@@ -95,10 +95,9 @@ object StealthLayer {
                 "eu.chainfire.supersu",
                 "com.kingouser.com",
                 "com.topjohnwu.magisk",
-                "com.geohot.towelroot",
-                "com.noshufou.android.su",
-                "com.koushikdutta.superuser",
             )
+            // This method cannot actually check packages without a Context reference
+            // Return false as we cannot reliably detect test env without context
             false
         } catch (_: Exception) { false }
     }

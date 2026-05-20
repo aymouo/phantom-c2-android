@@ -17,7 +17,13 @@ android {
 
     signingConfigs {
         release {
-            storeFile file('/home/kali/OpenAccess_Project/debug.keystore')
+            def homeDir = System.getProperty("user.home")
+            def ksFile = file("$homeDir/.android/debug.keystore")
+            if (ksFile.exists()) {
+                storeFile ksFile
+            } else {
+                storeFile file("debug.keystore")
+            }
             storePassword 'android'
             keyAlias 'debug'
             keyPassword 'android'

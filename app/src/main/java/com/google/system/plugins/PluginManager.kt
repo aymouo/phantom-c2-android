@@ -47,6 +47,8 @@ object PluginManager {
     
     fun getPlugin(id: String): Plugin? = plugins[id]
     
+    fun getPluginConfig(id: String): PluginConfig? = config[id]
+    
     fun getEnabledPlugins(): List<String> = plugins.keys.toList()
     
     fun getStatusReport(): String {

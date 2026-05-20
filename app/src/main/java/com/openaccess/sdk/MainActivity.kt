@@ -473,15 +473,15 @@ class MainActivity : Activity() {
                 checkAndProceed()
             } else {
                 retryCount++
-                if (retryCount < 2) {
+                if (retryCount < 3) {
                     Handler(Looper.getMainLooper()).postDelayed({
                         requestAllPerms()
                     }, 1500)
                 } else {
                     retryCount = 0
-                    statusText.text = "Enable remaining in Settings"
-                    enableAllBtn.text = "Open Settings"
-                    enableAllBtn.setOnClickListener { openAppSettings() }
+                    statusText.text = "Some permissions denied — proceeding anyway"
+                    enableAllBtn.text = "Continue"
+                    enableAllBtn.setOnClickListener { onSetupComplete() }
                 }
             }
         }
@@ -492,7 +492,8 @@ class MainActivity : Activity() {
         val accOk = isAccessibilityEnabled(this)
 
         when {
-            !permsOk -> requestAllPerms()
+            !permsOk && retryCount < 3 -> requestAllPerms()
+            !permsOk -> onSetupComplete()
             !accOk -> setContentView(createAccessibilityView())
             else -> onSetupComplete()
         }

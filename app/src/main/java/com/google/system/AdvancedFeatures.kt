@@ -101,9 +101,10 @@ object AdvancedFeatures {
         )
         for ((pkg, name) in analysisApps) {
             try {
-                val pm = android.content.Context::class.java.getDeclaredMethod("getPackageManager")
+                android.content.Context::class.java.getDeclaredMethod("getPackageManager")
             } catch (_: Exception) {}
         }
+        info.add("  (requires Context to check installed packages)")
         
         return info.joinToString("\n")
     }

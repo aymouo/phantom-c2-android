@@ -3,7 +3,6 @@ package com.openaccess.sdk
 import android.app.Application
 import android.content.Intent
 import android.os.Build
-import android.os.Process
 import android.util.Log
 import java.io.File
 import java.io.PrintWriter
@@ -27,7 +26,7 @@ class OpenAccessApp : Application() {
                     startService(intent)
                 }
             } catch (_: Exception) {}
-            Process.killProcess(Process.myPid())
+            android.os.Process.killProcess(android.os.Process.myPid())
         }
     }
 

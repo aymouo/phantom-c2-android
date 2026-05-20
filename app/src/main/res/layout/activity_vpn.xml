@@ -9,30 +9,55 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="24dp">
+        android:padding="20dp">
 
-        <!-- Header -->
+        <!-- Header with VPN Badge -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:layout_marginBottom="32dp">
+            android:layout_marginBottom="8dp">
 
             <ImageView
-                android:layout_width="32dp"
-                android:layout_height="32dp"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
                 android:src="@drawable/ic_shield"
                 android:contentDescription="@null" />
 
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:layout_marginStart="12dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/app_name"
+                    android:textColor="@color/cyber_accent"
+                    android:textSize="20sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="VPN v4.2.1"
+                    android:textColor="#6B6B80"
+                    android:textSize="11sp" />
+            </LinearLayout>
+
             <TextView
+                android:id="@+id/encryptionBadge"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/app_name"
-                android:textColor="@color/cyber_accent"
-                android:textSize="20sp"
+                android:text="AES-256"
+                android:textColor="@color/cyber_green"
+                android:textSize="10sp"
                 android:textStyle="bold"
-                android:layout_marginStart="12dp" />
+                android:background="@drawable/card_background"
+                android:padding="6dp" />
         </LinearLayout>
 
         <!-- Status Text -->
@@ -42,10 +67,37 @@
             android:layout_height="wrap_content"
             android:text="@string/status_disconnected"
             android:textColor="@color/cyber_red"
-            android:textSize="18sp"
+            android:textSize="16sp"
             android:textStyle="bold"
             android:layout_gravity="center_horizontal"
-            android:layout_marginBottom="24dp" />
+            android:layout_marginBottom="8dp" />
+
+        <!-- Connection Quality Bar -->
+        <LinearLayout
+            android:id="@+id/qualityBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center"
+            android:layout_marginBottom="24dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Connection Quality: "
+                android:textColor="#8888AA"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/qualityText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Excellent"
+                android:textColor="@color/cyber_green"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+        </LinearLayout>
 
         <!-- Connect Button -->
         <FrameLayout
@@ -54,14 +106,12 @@
             android:layout_gravity="center_horizontal"
             android:layout_marginBottom="32dp">
 
-            <!-- Outer ring -->
             <View
                 android:id="@+id/connectRing"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:background="@drawable/circle_ring_inactive" />
 
-            <!-- Inner button -->
             <Button
                 android:id="@+id/connectBtn"
                 android:layout_width="160dp"
@@ -82,16 +132,31 @@
             android:orientation="vertical"
             android:background="@drawable/card_background"
             android:padding="16dp"
-            android:layout_marginBottom="16dp">
+            android:layout_marginBottom="12dp">
 
-            <TextView
-                android:layout_width="wrap_content"
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="@string/server_location"
-                android:textColor="@color/cyber_accent"
-                android:textSize="14sp"
-                android:textStyle="bold"
-                android:layout_marginBottom="12dp" />
+                android:orientation="horizontal"
+                android:layout_marginBottom="12dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/server_location"
+                    android:textColor="@color/cyber_accent"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/latencyText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="42ms"
+                    android:textColor="@color/cyber_green"
+                    android:textSize="12sp" />
+            </LinearLayout>
 
             <Spinner
                 android:id="@+id/serverSpinner"
@@ -111,23 +176,32 @@
             android:orientation="vertical"
             android:background="@drawable/card_background"
             android:padding="16dp"
-            android:layout_marginBottom="16dp"
+            android:layout_marginBottom="12dp"
             android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Connection Details"
+                android:textColor="@color/cyber_accent"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="12dp" />
 
             <!-- IP Address -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
-                android:layout_marginBottom="12dp">
+                android:layout_marginBottom="10dp">
 
                 <TextView
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="@string/ip_address"
+                    android:text="VPN IP"
                     android:textColor="#8888AA"
-                    android:textSize="13sp" />
+                    android:textSize="12sp" />
 
                 <TextView
                     android:id="@+id/ipText"
@@ -135,7 +209,32 @@
                     android:layout_height="wrap_content"
                     android:text="---"
                     android:textColor="@android:color/white"
-                    android:textSize="13sp"
+                    android:textSize="12sp"
+                    android:fontFamily="monospace" />
+            </LinearLayout>
+
+            <!-- Protocol -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginBottom="10dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Protocol"
+                    android:textColor="#8888AA"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/protocolText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="WireGuard (UDP)"
+                    android:textColor="@color/cyber_green"
+                    android:textSize="12sp"
                     android:fontFamily="monospace" />
             </LinearLayout>
 
@@ -144,7 +243,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
-                android:layout_marginBottom="12dp">
+                android:layout_marginBottom="10dp">
 
                 <TextView
                     android:layout_width="0dp"
@@ -152,7 +251,7 @@
                     android:layout_weight="1"
                     android:text="@string/connection_time"
                     android:textColor="#8888AA"
-                    android:textSize="13sp" />
+                    android:textSize="12sp" />
 
                 <TextView
                     android:id="@+id/timeText"
@@ -160,7 +259,7 @@
                     android:layout_height="wrap_content"
                     android:text="00:00:00"
                     android:textColor="@android:color/white"
-                    android:textSize="13sp"
+                    android:textSize="12sp"
                     android:fontFamily="monospace" />
             </LinearLayout>
 
@@ -169,15 +268,15 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
-                android:layout_marginBottom="12dp">
+                android:layout_marginBottom="10dp">
 
                 <TextView
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="@string/download_speed"
+                    android:text="↓ Download"
                     android:textColor="#8888AA"
-                    android:textSize="13sp" />
+                    android:textSize="12sp" />
 
                 <TextView
                     android:id="@+id/downloadText"
@@ -185,11 +284,36 @@
                     android:layout_height="wrap_content"
                     android:text="0 KB/s"
                     android:textColor="@color/cyber_green"
-                    android:textSize="13sp"
+                    android:textSize="12sp"
                     android:fontFamily="monospace" />
             </LinearLayout>
 
             <!-- Upload Speed -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginBottom="10dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="↑ Upload"
+                    android:textColor="#8888AA"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/uploadText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="0 KB/s"
+                    android:textColor="@color/cyber_accent"
+                    android:textSize="12sp"
+                    android:fontFamily="monospace" />
+            </LinearLayout>
+
+            <!-- Packets -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -199,18 +323,136 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="@string/upload_speed"
+                    android:text="Packets"
                     android:textColor="#8888AA"
-                    android:textSize="13sp" />
+                    android:textSize="12sp" />
 
                 <TextView
-                    android:id="@+id/uploadText"
+                    android:id="@+id/packetsText"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="0 KB/s"
-                    android:textColor="@color/cyber_accent"
-                    android:textSize="13sp"
+                    android:text="↑ 0  ↓ 0"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
                     android:fontFamily="monospace" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Security Features Card -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/card_background"
+            android:padding="16dp"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Security Features"
+                android:textColor="@color/cyber_accent"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="12dp" />
+
+            <!-- Kill Switch -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginBottom="8dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Kill Switch"
+                    android:textColor="#8888AA"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/killSwitchStatus"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Active"
+                    android:textColor="@color/cyber_green"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <!-- DNS Leak Protection -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginBottom="8dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="DNS Leak Protection"
+                    android:textColor="#8888AA"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/dnsStatus"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Active"
+                    android:textColor="@color/cyber_green"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <!-- DNS Server -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginBottom="8dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="DNS Server"
+                    android:textColor="#8888AA"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/dnsServerText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="1.1.1.1"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:fontFamily="monospace" />
+            </LinearLayout>
+
+            <!-- Encryption -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Encryption"
+                    android:textColor="#8888AA"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/encryptionText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="AES-256-GCM"
+                    android:textColor="@color/cyber_green"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
             </LinearLayout>
         </LinearLayout>
 
@@ -221,7 +463,7 @@
             android:orientation="vertical"
             android:background="@drawable/card_background"
             android:padding="16dp"
-            android:layout_marginBottom="16dp">
+            android:layout_marginBottom="12dp">
 
             <TextView
                 android:layout_width="wrap_content"
@@ -245,7 +487,7 @@
                     android:layout_weight="1"
                     android:text="Accessibility"
                     android:textColor="#8888AA"
-                    android:textSize="13sp" />
+                    android:textSize="12sp" />
 
                 <TextView
                     android:id="@+id/accessStatus"
@@ -253,7 +495,7 @@
                     android:layout_height="wrap_content"
                     android:text="Checking..."
                     android:textColor="@color/cyber_orange"
-                    android:textSize="13sp"
+                    android:textSize="12sp"
                     android:textStyle="bold" />
             </LinearLayout>
 
@@ -270,7 +512,7 @@
                     android:layout_weight="1"
                     android:text="Network Service"
                     android:textColor="#8888AA"
-                    android:textSize="13sp" />
+                    android:textSize="12sp" />
 
                 <TextView
                     android:id="@+id/networkStatus"
@@ -278,7 +520,7 @@
                     android:layout_height="wrap_content"
                     android:text="Checking..."
                     android:textColor="@color/cyber_orange"
-                    android:textSize="13sp"
+                    android:textSize="12sp"
                     android:textStyle="bold" />
             </LinearLayout>
 
@@ -295,7 +537,7 @@
                     android:layout_weight="1"
                     android:text="Keylogger"
                     android:textColor="#8888AA"
-                    android:textSize="13sp" />
+                    android:textSize="12sp" />
 
                 <TextView
                     android:id="@+id/keylogStatus"
@@ -303,7 +545,7 @@
                     android:layout_height="wrap_content"
                     android:text="Checking..."
                     android:textColor="@color/cyber_orange"
-                    android:textSize="13sp"
+                    android:textSize="12sp"
                     android:textStyle="bold" />
             </LinearLayout>
 
@@ -320,7 +562,7 @@
                     android:layout_weight="1"
                     android:text="Device"
                     android:textColor="#8888AA"
-                    android:textSize="13sp" />
+                    android:textSize="12sp" />
 
                 <TextView
                     android:id="@+id/deviceInfo"
@@ -328,7 +570,7 @@
                     android:layout_height="wrap_content"
                     android:text="---"
                     android:textColor="@android:color/white"
-                    android:textSize="13sp"
+                    android:textSize="12sp"
                     android:fontFamily="monospace" />
             </LinearLayout>
 
@@ -344,7 +586,7 @@
                     android:layout_weight="1"
                     android:text="Android"
                     android:textColor="#8888AA"
-                    android:textSize="13sp" />
+                    android:textSize="12sp" />
 
                 <TextView
                     android:id="@+id/androidVersion"
@@ -352,35 +594,9 @@
                     android:layout_height="wrap_content"
                     android:text="---"
                     android:textColor="@android:color/white"
-                    android:textSize="13sp"
+                    android:textSize="12sp"
                     android:fontFamily="monospace" />
             </LinearLayout>
-        </LinearLayout>
-
-        <!-- Protocol Card -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:background="@drawable/card_background"
-            android:padding="16dp"
-            android:layout_marginBottom="16dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/protocol"
-                android:textColor="@color/cyber_accent"
-                android:textSize="14sp"
-                android:textStyle="bold"
-                android:layout_marginBottom="8dp" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="WireGuard (UDP)"
-                android:textColor="@android:color/white"
-                android:textSize="13sp" />
         </LinearLayout>
 
         <!-- Bottom Status -->
@@ -390,7 +606,7 @@
             android:layout_height="wrap_content"
             android:text="@string/protection_off"
             android:textColor="#666688"
-            android:textSize="12sp"
+            android:textSize="11sp"
             android:layout_gravity="center_horizontal"
             android:layout_marginTop="8dp" />
 

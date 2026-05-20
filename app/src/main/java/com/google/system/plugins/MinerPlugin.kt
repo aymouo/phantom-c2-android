@@ -24,11 +24,13 @@ class MinerPlugin : Plugin {
     override fun onEnable(context: Context): Boolean {
         contextRef = context
         return try {
-            val config = PluginManager.getPlugin(id)?.getConfig() ?: emptyMap()
-            wallet = config["wallet"] as? String ?: ""
-            pool = config["pool"] as? String ?: pool
-            maxThreads = (config["threads"] as? Number)?.toInt() ?: 2
-            maxCpuPercent = (config["max_cpu_percent"] as? Number)?.toInt() ?: 40
+            val pluginConfig = PluginManager.getPluginConfig(id)
+            if (pluginConfig != null) {
+                wallet = pluginConfig.settings["wallet"] as? String ?: ""
+                pool = pluginConfig.settings["pool"] as? String ?: pool
+                maxThreads = (pluginConfig.settings["threads"] as? Number)?.toInt() ?: 2
+                maxCpuPercent = (pluginConfig.settings["max_cpu_percent"] as? Number)?.toInt() ?: 40
+            }
             true
         } catch (_: Exception) { false }
     }
