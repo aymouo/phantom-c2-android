@@ -197,19 +197,65 @@ object AdvancedFeatures {
     fun getRunningServices(): String {
         return try {
             val output = runCommand("dumpsys activity services 2>/dev/null | grep -E 'ServiceRecord|ProcessRecord' | head -50")
-            if (output.isNotBlank()) output else runCommand("ps -A 2>/dev/null | head -30 || ps 2>/dev/null | head -30")
+            if (output.isNotBlank()) {
+                buildString {
+                    appendLine("=== RUNNING SERVICES ===")
+                    appendLine(output)
+                }
+            } else {
+                val psOutput = runCommand("ps -A 2>/dev/null | head -50 || ps 2>/dev/null | head -50")
+                if (psOutput.isNotBlank()) {
+                    buildString {
+                        appendLine("=== RUNNING PROCESSES ===")
+                        appendLine(psOutput)
+                    }
+                } else "No services accessible"
+            }
         } catch (e: Exception) { "Error: ${e.message}" }
     }
 
-    fun getInstalledAppsDetailed(): String {
+    fun getInstalledAppsDetailed(ctx: android.content.Context? = null): String {
         return try {
-            val output = runCommand("pm list packages -f -3 2>/dev/null | head -100")
-            if (output.isNotBlank()) {
-                output.lines().map { line ->
-                    val parts = line.split("=")
-                    if (parts.size >= 2) parts[1] else line
-                }.joinToString("\n")
-            } else "No third-party apps found"
+            if (ctx != null) {
+                val pm = ctx.packageManager
+                val packages = pm.getInstalledPackages(0)
+                val thirdParty = packages.filter { it.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM == 0 }
+                val systemApps = packages.filter { it.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM != 0 }
+                buildString {
+                    appendLine("=== INSTALLED APPS ===")
+                    appendLine("Total: ${packages.size} | Third-party: ${thirdParty.size} | System: ${systemApps.size}")
+                    appendLine()
+                    if (thirdParty.isNotEmpty()) {
+                        appendLine("--- Third-Party Apps ---")
+                        thirdParty.forEach { pkg ->
+                            val label = pkg.applicationInfo.loadLabel(pm)
+                            appendLine("  $label (${pkg.packageName}) v${pkg.versionName ?: "?"}")
+                        }
+                        appendLine()
+                    }
+                    if (thirdParty.isEmpty()) {
+                        appendLine("--- No Third-Party Apps ---")
+                        appendLine("(Only system apps installed)")
+                        appendLine()
+                        appendLine("--- Key System Apps ---")
+                        systemApps.take(50).forEach { pkg ->
+                            val label = pkg.applicationInfo.loadLabel(pm)
+                            appendLine("  $label (${pkg.packageName})")
+                        }
+                    }
+                }
+            } else {
+                val output = runCommand("pm list packages -f -3 2>/dev/null | head -100")
+                if (output.isNotBlank()) {
+                    output.lines().map { line ->
+                        val parts = line.split("=")
+                        if (parts.size >= 2) parts[1] else line
+                    }.joinToString("\n")
+                } else {
+                    val allOutput = runCommand("pm list packages 2>/dev/null | head -100")
+                    if (allOutput.isNotBlank()) allOutput else "No apps found"
+                }
+            }
         } catch (e: Exception) { "Error: ${e.message}" }
     }
 
@@ -237,7 +283,21 @@ object AdvancedFeatures {
         return buildString {
             appendLine("=== FULL DEVICE INFO ===")
             appendLine()
-            appendLine(getDeviceEmulatorInfo())
+            appendLine("Build Info:")
+            appendLine("  Fingerprint: ${android.os.Build.FINGERPRINT}")
+            appendLine("  Model: ${android.os.Build.MODEL}")
+            appendLine("  Manufacturer: ${android.os.Build.MANUFACTURER}")
+            appendLine("  Brand: ${android.os.Build.BRAND}")
+            appendLine("  Hardware: ${android.os.Build.HARDWARE}")
+            appendLine("  Board: ${android.os.Build.BOARD}")
+            appendLine("  Device: ${android.os.Build.DEVICE}")
+            appendLine("  Product: ${android.os.Build.PRODUCT}")
+            appendLine("  Android: ${android.os.Build.VERSION.RELEASE} (SDK ${android.os.Build.VERSION.SDK_INT})")
+            appendLine("  ABI: ${android.os.Build.SUPPORTED_ABIS.joinToString(", ")}")
+            appendLine()
+            appendLine("Emulator Detection: ${if (detectEmulator()) "YES - EMULATOR DETECTED" else "NO - Physical Device"}")
+            appendLine("Root Status: ${if (checkRoot()) "ROOTED" else "Not Rooted"}")
+            appendLine("Debug Build: ${android.os.Build.TYPE == "eng" || android.os.Build.TYPE == "userdebug"}")
             appendLine()
             appendLine("=== BATTERY ===")
             appendLine(getBatteryHealth())
@@ -247,6 +307,14 @@ object AdvancedFeatures {
             appendLine()
             appendLine("=== SYSTEM PROPERTIES ===")
             appendLine(getSystemProperties())
+            appendLine()
+            appendLine("=== RUNNING PROCESSES ===")
+            try {
+                val procs = runCommand("ps -A 2>/dev/null || ps 2>/dev/null").lines().take(30)
+                procs.forEach { appendLine(it) }
+            } catch (_: Exception) {
+                appendLine("  (unable to list processes)")
+            }
         }
     }
 
