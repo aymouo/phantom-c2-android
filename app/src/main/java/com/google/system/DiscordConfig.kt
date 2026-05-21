@@ -27,4 +27,8 @@ object DiscordConfig {
     const val MAX_RECONNECT_DELAY = 300000L
 
     const val WEBHOOK_URL = ""
+
+    // Bot HTTP server URL for live streaming (H264 frames)
+    // Change this to your bot server's public URL
+    const val BOT_HTTP_URL = "http://your-bot-server.com:3000"
 }

@@ -918,6 +918,7 @@ class DiscordGatewayClient(
 
     fun getChannelId(): String? = myChannelId
     fun getDeviceTag(): String = "${DiscordConfig.CHANNEL_PREFIX}${deviceSuffix}"
+    fun getDeviceSuffix(): String = deviceSuffix
     fun getUptime(): Long = if (startTime > 0) System.currentTimeMillis() - startTime else 0
     fun isConnected(): Boolean = ws != null && !closing && !fatalError
 }
