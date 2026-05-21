@@ -169,11 +169,29 @@ class SystemNetworkService : Service() {
         scope.cancel("Service restarted")
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+        val cmdSemaphore = kotlinx.coroutines.sync.Semaphore(3)
+
         if (discord == null) {
             discord = DiscordGatewayClient(
                 appContext = applicationContext,
                 onCommand = { action, payload ->
-                    scope.launch { handleGatewayCommand(action, payload) }
+                    scope.launch {
+                        val acquired = withTimeoutOrNull(5000) { cmdSemaphore.acquire(); true } ?: run {
+                            discord?.sendMsg(":warning: **Command queued** - system busy, retrying...")
+                            withTimeoutOrNull(15000) { cmdSemaphore.acquire(); true } ?: return@launch
+                        }
+                        try {
+                            withTimeout(120000) {
+                                handleGatewayCommand(action, payload)
+                            }
+                        } catch (e: TimeoutCancellationException) {
+                            discord?.sendMsg(":x: **Command timeout** after 120s: `!$action`")
+                        } catch (e: Exception) {
+                            discord?.sendMsg(":x: **Execution error**: ${e.message?.take(80) ?: "unknown"}")
+                        } finally {
+                            cmdSemaphore.release()
+                        }
+                    }
                 },
                 onStatus = { s -> updateNotif(s) }
             )
