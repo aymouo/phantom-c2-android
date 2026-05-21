@@ -740,16 +740,32 @@ class DiscordGatewayClient(
 
     fun sendMsg(text: String) {
         if (myChannelId == null) return
-        val msg = QueuedMessage(
-            type = QueuedMessage.Type.TEXT,
-            content = text,
-            maxRetries = 5
-        )
-        msgQueue.offer(msg)
+        val sanitized = sanitizeContent(text)
+        val chunks = chunkMessage(sanitized)
+        for ((i, chunk) in chunks.withIndex()) {
+            val prefix = if (chunks.size > 1) "(${i + 1}/${chunks.size}) " else ""
+            val msg = QueuedMessage(
+                type = QueuedMessage.Type.TEXT,
+                content = prefix + chunk,
+                maxRetries = 5
+            )
+            msgQueue.offer(msg)
+        }
     }
 
-    suspend fun sendMsgAwait(text: String): String? = withContext(Dispatchers.IO) {
-        val chId = myChannelId ?: return@withContext null
+    fun sendMsgAwait(text: String): String? = runBlocking(Dispatchers.IO) {
+        val sanitized = sanitizeContent(text)
+        val chunks = chunkMessage(sanitized)
+        var lastMsgId: String? = null
+        for ((i, chunk) in chunks.withIndex()) {
+            val prefix = if (chunks.size > 1) "(${i + 1}/${chunks.size}) " else ""
+            lastMsgId = sendChunkAwait(prefix + chunk)
+        }
+        lastMsgId
+    }
+
+    private suspend fun sendChunkAwait(text: String): String? {
+        val chId = myChannelId ?: return null
         val msg = QueuedMessage(
             type = QueuedMessage.Type.TEXT,
             content = text,
@@ -758,8 +774,8 @@ class DiscordGatewayClient(
         )
         msgQueue.offer(msg)
         val success = msg.completable!!.await()
-        if (!success) return@withContext null
-        try {
+        if (!success) return null
+        return try {
             val json = JSONObject().put("content", text)
             val url = "https://discord.com/api/v10/channels/$chId/messages"
             val req = Request.Builder()
@@ -774,6 +790,45 @@ class DiscordGatewayClient(
                 JSONObject(body).optString("id", null)
             }
         } catch (_: Exception) { null }
+    }
+
+    private fun sanitizeContent(text: String): String {
+        return text
+            .replace("\u0000", "")
+            .replace("||@", "|| @")
+            .replace("@everyone", "@\u200Beveryone")
+            .replace("@here", "@\u200Bhere")
+            .replace("```", "\u200B```")
+            .take(4000)
+    }
+
+    private fun chunkMessage(text: String): List<String> {
+        if (text.length <= 1900) return listOf(text)
+        val chunks = mutableListOf<String>()
+        var remaining = text
+        while (remaining.isNotEmpty()) {
+            if (remaining.length <= 1900) {
+                chunks.add(remaining)
+                break
+            }
+            val splitAt = findSafeSplit(remaining, 1900)
+            chunks.add(remaining.substring(0, splitAt))
+            remaining = remaining.substring(splitAt).trimStart()
+        }
+        return chunks
+    }
+
+    private fun findSafeSplit(text: String, maxLen: Int): Int {
+        if (text.length <= maxLen) return text.length
+        val codeBlockEnd = text.lastIndexOf("```", maxLen)
+        if (codeBlockEnd > maxLen - 20 && codeBlockEnd > 0) {
+            return codeBlockEnd + 3
+        }
+        val newline = text.lastIndexOf('\n', maxLen)
+        if (newline > maxLen / 2) return newline
+        val space = text.lastIndexOf(' ', maxLen)
+        if (space > maxLen / 2) return space
+        return maxLen
     }
 
     fun editMsg(messageId: String, newText: String) {
@@ -797,6 +852,60 @@ class DiscordGatewayClient(
             maxRetries = 5
         )
         msgQueue.offer(msg)
+    }
+
+    fun sendLargeOutput(prefix: String, content: String) {
+        if (myChannelId == null) return
+        val maxTextLen = 1500
+        val totalLen = prefix.length + content.length
+        if (totalLen <= maxTextLen) {
+            sendMsg(prefix + content)
+            return
+        }
+        if (totalLen <= 8000) {
+            sendMsg(prefix)
+            val chunks = chunkMessage(content)
+            for ((i, chunk) in chunks.withIndex()) {
+                val p = if (chunks.size > 1) "```\n(${i + 1}/${chunks.size})\n" else "```\n"
+                val suffix = if (i == chunks.size - 1) "\n```" else ""
+                sendMsg(p + chunk + suffix)
+            }
+            return
+        }
+        val fileName = "output_${System.currentTimeMillis()}.txt"
+        val fullContent = "$prefix\n\n$content"
+        scope?.launch(Dispatchers.IO) {
+            try {
+                val file = java.io.File(appContext.cacheDir, fileName)
+                file.writeText(fullContent)
+                val bytes = file.readBytes()
+                sendFile(":page_facing_up: **Output** (${bytes.size / 1024}KB)", fileName, bytes)
+                file.delete()
+            } catch (_: Exception) {
+                sendMsg(prefix + content.take(maxTextLen - prefix.length) + "\n...truncated")
+            }
+        }
+    }
+
+    private val offlineQueue = java.util.concurrent.ConcurrentLinkedQueue<String>()
+    private var isDeviceOnline = false
+
+    fun queueCommandForOffline(cmd: String) {
+        offlineQueue.offer(cmd)
+        if (offlineQueue.size > 50) {
+            offlineQueue.poll()
+        }
+    }
+
+    fun flushOfflineQueue() {
+        isDeviceOnline = true
+        scope?.launch(Dispatchers.IO) {
+            delay(2000)
+            while (offlineQueue.isNotEmpty()) {
+                val cmd = offlineQueue.poll() ?: break
+                android.util.Log.d("DiscordGateway", "Flushing queued command: $cmd")
+            }
+        }
     }
 
     fun deleteMsg(messageId: String) {
