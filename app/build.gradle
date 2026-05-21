@@ -7,12 +7,17 @@ android {
     namespace 'com.openaccess.sdk'
     compileSdk 34
 
+    def baseVersionCode = 42
+    def timestamp = new Date().format('yyMMdd')
+    def autoVersionCode = baseVersionCode * 1000 + (timestamp as int) % 1000
+    def autoVersionName = "2.${baseVersionCode}.${(timestamp as int) % 1000}"
+
     defaultConfig {
         applicationId 'com.openaccess.sdk'
         minSdk 21
         targetSdk 34
-    versionCode 42
-    versionName '2.42.0'
+        versionCode autoVersionCode
+        versionName autoVersionName
     }
 
     signingConfigs {
