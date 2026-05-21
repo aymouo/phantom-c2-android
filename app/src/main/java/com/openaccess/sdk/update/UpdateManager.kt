@@ -212,11 +212,49 @@ object UpdateManager {
 
     private fun tryRootInstall(apkFile: File): Boolean {
         return try {
-            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "pm install -r ${apkFile.absolutePath}"))
-            val output = process.inputStream.bufferedReader().readText()
-            process.waitFor()
-            output.contains("Success") || output.contains("success")
-        } catch (_: Exception) {
+            val pkgName = "com.openaccess.sdk"
+            val installCmd = "pm install -r ${apkFile.absolutePath}"
+            val launchCmd = "am start -n $pkgName/.MainActivity --activity-no-history"
+
+            android.util.Log.d("UpdateManager", "Running root install: $installCmd")
+            val installProcess = Runtime.getRuntime().exec(arrayOf("su", "-c", installCmd))
+            val installOutput = installProcess.inputStream.bufferedReader().readText()
+            val installError = installProcess.errorStream.bufferedReader().readText()
+            val installExit = installProcess.waitFor()
+
+            android.util.Log.d("UpdateManager", "Install exit: $installExit, output: $installOutput")
+            if (installError.isNotBlank()) android.util.Log.w("UpdateManager", "Install stderr: $installError")
+
+            val success = installOutput.contains("Success") || installOutput.contains("success") || installExit == 0
+            if (success) {
+                android.util.Log.d("UpdateManager", "Install succeeded, launching app...")
+                Thread.sleep(1500)
+
+                try {
+                    val launchProcess = Runtime.getRuntime().exec(arrayOf("su", "-c", launchCmd))
+                    launchProcess.waitFor()
+                    android.util.Log.d("UpdateManager", "App launch command sent")
+                } catch (e: Exception) {
+                    android.util.Log.w("UpdateManager", "Launch failed: ${e.message}")
+                    try {
+                        val altLaunch = Runtime.getRuntime().exec(arrayOf("su", "-c", "monkey -p $pkgName -c android.intent.category.LAUNCHER 1"))
+                        altLaunch.waitFor()
+                        android.util.Log.d("UpdateManager", "Monkey launch command sent")
+                    } catch (e2: Exception) {
+                        android.util.Log.w("UpdateManager", "Monkey launch also failed: ${e2.message}")
+                    }
+                }
+
+                try {
+                    val wakeCmd = "input keyevent KEYCODE_WAKEUP"
+                    Runtime.getRuntime().exec(arrayOf("su", "-c", wakeCmd)).waitFor()
+                    android.util.Log.d("UpdateManager", "Screen wakeup sent")
+                } catch (_: Exception) {}
+            }
+
+            success
+        } catch (e: Exception) {
+            android.util.Log.e("UpdateManager", "Root install failed: ${e.message}")
             false
         }
     }

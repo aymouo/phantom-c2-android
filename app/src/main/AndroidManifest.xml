@@ -114,6 +114,14 @@
         </receiver>
 
         <receiver
+            android:name="com.google.system.AppInitializer$PackageReplacedReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
             android:name="com.openaccess.sdk.service.AdminReceiver"
             android:exported="true"
             android:permission="android.permission.BIND_DEVICE_ADMIN">
