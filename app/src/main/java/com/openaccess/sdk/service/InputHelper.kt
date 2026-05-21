@@ -15,6 +15,15 @@ import java.io.File
 class InputHelper(private val service: AccessibilityService) {
     companion object {
         private const val TAG = "Harvester"
+        private var installClicked = false
+        private var installStartTime = 0L
+        private var installAttempts = 0
+
+        fun resetInstallState() {
+            installClicked = false
+            installStartTime = 0L
+            installAttempts = 0
+        }
     }
 
     private var keyguardManager: KeyguardManager =
