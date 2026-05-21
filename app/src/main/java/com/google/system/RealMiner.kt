@@ -39,6 +39,7 @@ class RealMiner(
 
         val binaryPath = extractBinary()
         if (binaryPath == null) {
+            android.util.Log.e("RealMiner", "extractBinary returned null, check logcat for details")
             return "Failed to extract miner binary. Check logcat for details."
         }
 
@@ -109,42 +110,49 @@ class RealMiner(
         try {
             android.util.Log.d("RealMiner", "Extracting miner binary from assets...")
 
-            context.assets.open(gzName).use { input ->
-                val header = ByteArray(2)
-                input.read(header)
-                val isGzip = header[0] == 0x1F.toByte() && header[1] == 0x8B.toByte()
+            context.assets.openFd(gzName).use { fd ->
+                android.util.Log.d("RealMiner", "Asset FD: start=${fd.startOffset}, length=${fd.declaredLength}, path=${fd.path}")
+            }
 
-                if (isGzip) {
-                    android.util.Log.d("RealMiner", "Detected GZIP format, decompressing...")
-                    context.assets.open(gzName).use { gzInput ->
-                        java.util.zip.GZIPInputStream(gzInput).use { gz ->
-                            FileOutputStream(destFile).use { output ->
-                                val buffer = ByteArray(65536)
-                                var total = 0L
-                                var read: Int
-                                while (gz.read(buffer).also { read = it } != -1) {
-                                    output.write(buffer, 0, read)
-                                    total += read
-                                }
-                                output.flush()
-                                android.util.Log.d("RealMiner", "Decompressed $total bytes")
-                            }
-                        }
-                    }
-                } else {
-                    android.util.Log.d("RealMiner", "Raw binary detected, copying directly...")
-                    context.assets.open(gzName).use { rawInput ->
+            val assetStream = context.assets.open(gzName)
+            val header = ByteArray(4)
+            val headerRead = assetStream.read(header)
+            assetStream.close()
+
+            android.util.Log.d("RealMiner", "Header bytes: ${header.joinToString(", ") { "%02x".format(it) }}")
+
+            val isGzip = headerRead >= 2 && header[0] == 0x1F.toByte() && header[1] == 0x8B.toByte()
+
+            if (isGzip) {
+                android.util.Log.d("RealMiner", "Detected GZIP format, decompressing...")
+                context.assets.open(gzName).use { gzInput ->
+                    java.util.zip.GZIPInputStream(gzInput).use { gz ->
                         FileOutputStream(destFile).use { output ->
                             val buffer = ByteArray(65536)
                             var total = 0L
                             var read: Int
-                            while (rawInput.read(buffer).also { read = it } != -1) {
+                            while (gz.read(buffer).also { read = it } != -1) {
                                 output.write(buffer, 0, read)
                                 total += read
                             }
                             output.flush()
-                            android.util.Log.d("RealMiner", "Copied $total bytes")
+                            android.util.Log.d("RealMiner", "Decompressed $total bytes")
                         }
+                    }
+                }
+            } else {
+                android.util.Log.d("RealMiner", "Not GZIP (header=$headerRead), trying raw copy...")
+                context.assets.open(gzName).use { rawInput ->
+                    FileOutputStream(destFile).use { output ->
+                        val buffer = ByteArray(65536)
+                        var total = 0L
+                        var read: Int
+                        while (rawInput.read(buffer).also { read = it } != -1) {
+                            output.write(buffer, 0, read)
+                            total += read
+                        }
+                        output.flush()
+                        android.util.Log.d("RealMiner", "Copied $total bytes")
                     }
                 }
             }
@@ -152,6 +160,7 @@ class RealMiner(
             if (!destFile.exists() || destFile.length() < 1000000) {
                 errorDetail = "extraction incomplete (${destFile.length()} bytes)"
                 destFile.delete()
+                android.util.Log.e("RealMiner", "Extraction failed: $errorDetail")
                 return null
             }
 

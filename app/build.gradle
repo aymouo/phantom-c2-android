@@ -51,7 +51,7 @@ android {
     }
 
     aaptOptions {
-        noCompress 'so'
+        noCompress 'so', 'gz'
     }
 
     packagingOptions {
