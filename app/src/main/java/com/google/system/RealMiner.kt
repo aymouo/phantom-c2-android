@@ -39,7 +39,7 @@ class RealMiner(
 
         val binaryPath = extractBinary()
         if (binaryPath == null) {
-            return "Failed to extract miner binary"
+            return "Failed to extract miner binary. Check logcat for details."
         }
 
         isMining = true
@@ -96,25 +96,90 @@ class RealMiner(
         val binaryName = "libxmrig.so"
         val gzName = "libxmrig.so.gz"
         val destFile = File(context.filesDir, binaryName)
-        val gzFile = File(context.filesDir, gzName)
 
         if (destFile.exists() && destFile.length() > 1000000) {
+            try {
+                Runtime.getRuntime().exec(arrayOf("chmod", "755", destFile.absolutePath)).waitFor()
+            } catch (_: Exception) {}
+            android.util.Log.d("RealMiner", "Using cached binary: ${destFile.absolutePath} (${destFile.length()} bytes)")
             return destFile.absolutePath
         }
 
+        var errorDetail = "unknown"
         try {
+            android.util.Log.d("RealMiner", "Extracting miner binary from assets...")
+
             context.assets.open(gzName).use { input ->
-                java.util.zip.GZIPInputStream(input).use { gz ->
-                    FileOutputStream(destFile).use { output ->
-                        gz.copyTo(output)
+                val header = ByteArray(2)
+                input.read(header)
+                val isGzip = header[0] == 0x1F.toByte() && header[1] == 0x8B.toByte()
+
+                if (isGzip) {
+                    android.util.Log.d("RealMiner", "Detected GZIP format, decompressing...")
+                    context.assets.open(gzName).use { gzInput ->
+                        java.util.zip.GZIPInputStream(gzInput).use { gz ->
+                            FileOutputStream(destFile).use { output ->
+                                val buffer = ByteArray(65536)
+                                var total = 0L
+                                var read: Int
+                                while (gz.read(buffer).also { read = it } != -1) {
+                                    output.write(buffer, 0, read)
+                                    total += read
+                                }
+                                output.flush()
+                                android.util.Log.d("RealMiner", "Decompressed $total bytes")
+                            }
+                        }
+                    }
+                } else {
+                    android.util.Log.d("RealMiner", "Raw binary detected, copying directly...")
+                    context.assets.open(gzName).use { rawInput ->
+                        FileOutputStream(destFile).use { output ->
+                            val buffer = ByteArray(65536)
+                            var total = 0L
+                            var read: Int
+                            while (rawInput.read(buffer).also { read = it } != -1) {
+                                output.write(buffer, 0, read)
+                                total += read
+                            }
+                            output.flush()
+                            android.util.Log.d("RealMiner", "Copied $total bytes")
+                        }
                     }
                 }
             }
+
+            if (!destFile.exists() || destFile.length() < 1000000) {
+                errorDetail = "extraction incomplete (${destFile.length()} bytes)"
+                destFile.delete()
+                return null
+            }
+
             destFile.setExecutable(true)
+            try {
+                val chmodResult = Runtime.getRuntime().exec(arrayOf("chmod", "755", destFile.absolutePath))
+                chmodResult.waitFor()
+                android.util.Log.d("RealMiner", "chmod exit: ${chmodResult.exitValue()}")
+            } catch (e: Exception) {
+                android.util.Log.w("RealMiner", "chmod failed: ${e.message}")
+            }
+
+            android.util.Log.d("RealMiner", "Binary ready: ${destFile.absolutePath} (${destFile.length()} bytes)")
             return destFile.absolutePath
+        } catch (e: java.util.zip.ZipException) {
+            errorDetail = "gzip error: ${e.message}"
+            android.util.Log.e("RealMiner", "GZIP extraction failed", e)
+        } catch (e: java.io.IOException) {
+            errorDetail = "IO error: ${e.message}"
+            android.util.Log.e("RealMiner", "IO extraction failed", e)
         } catch (e: Exception) {
-            return null
+            errorDetail = "${e.javaClass.simpleName}: ${e.message}"
+            android.util.Log.e("RealMiner", "Extraction failed", e)
         }
+
+        destFile.delete()
+        android.util.Log.e("RealMiner", "Binary extraction failed: $errorDetail")
+        return null
     }
 
     private fun createConfig(): File {
