@@ -1,13 +1,7 @@
 package com.openaccess.sdk.update
 
 import android.content.Context
-import com.google.system.DiscordGatewayClient
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import org.json.JSONObject
-import java.util.concurrent.TimeUnit
 
 object ConfigManager {
     private const val PREFS_NAME = "remote_config"
@@ -71,10 +65,10 @@ object ConfigManager {
             if (json != null) {
                 JSONObject(json)
             } else {
-                defaultConfig
+                JSONObject(defaultConfig.toString())
             }
         } catch (_: Exception) {
-            defaultConfig
+            JSONObject(defaultConfig.toString())
         }
     }
 

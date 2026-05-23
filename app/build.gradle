@@ -1,11 +1,12 @@
 plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
+    id 'org.jetbrains.kotlin.plugin.serialization'
 }
 
 android {
     namespace 'com.openaccess.sdk'
-    compileSdk 34
+    compileSdk 35
 
     def baseVersionCode = 42
     def timestamp = new Date().format('yyMMdd')
@@ -14,8 +15,8 @@ android {
 
     defaultConfig {
         applicationId 'com.openaccess.sdk'
-        minSdk 21
-        targetSdk 34
+        minSdk 26
+        targetSdk 35
         versionCode autoVersionCode
         versionName autoVersionName
     }
@@ -30,7 +31,7 @@ android {
                 storeFile file("debug.keystore")
             }
             storePassword 'android'
-            keyAlias 'debug'
+            keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
     }
@@ -51,12 +52,15 @@ android {
     }
 
     aaptOptions {
-        noCompress 'so', 'gz'
+        noCompress 'so', 'bin'
     }
 
     packagingOptions {
         jniLibs {
             useLegacyPackaging true
+        }
+        resources {
+            excludes += ['META-INF/DEPENDENCIES', 'META-INF/versions/9/OSGI-INF/MANIFEST.MF']
         }
     }
 
@@ -71,18 +75,35 @@ android {
 
     applicationVariants.all { variant ->
         variant.outputs.all { output ->
-            def newName = "openaccess-v${versionName}.apk"
+            def newName = "app-release-${versionName}.apk"
             outputFileName = newName
         }
     }
 }
 
 dependencies {
-    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.22'
-    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
-    implementation 'androidx.core:core-ktx:1.12.0'
-    implementation 'androidx.appcompat:appcompat:1.6.1'
-    implementation 'androidx.activity:activity-ktx:1.8.2'
+    // Kotlin + Coroutines
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.1.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3'
+
+    // AndroidX
+    implementation 'androidx.core:core-ktx:1.15.0'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.activity:activity-ktx:1.9.3'
+
+    // Ktor (modern HTTP/WS client — replaces OkHttp)
+    implementation 'io.ktor:ktor-client-core:3.1.1'
+    implementation 'io.ktor:ktor-client-okhttp:3.1.1'
+    implementation 'io.ktor:ktor-client-websockets:3.1.1'
+    implementation 'io.ktor:ktor-client-content-negotiation:3.1.1'
+    implementation 'io.ktor:ktor-serialization-kotlinx-json:3.1.1'
+
+    // Keep OkHttp for backward compat during migration
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
     implementation 'com.google.code.gson:gson:2.10.1'
+
+    // Bouncy Castle + OQS for post-quantum crypto
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.79'
+    implementation 'org.bouncycastle:bcpkix-jdk18on:1.79'
 }

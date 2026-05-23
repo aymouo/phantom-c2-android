@@ -99,11 +99,6 @@ object AdvancedFeatures {
             "com.kingouser.com" to "KingRoot",
             "com.topjohnwu.magisk" to "Magisk",
         )
-        for ((pkg, name) in analysisApps) {
-            try {
-                android.content.Context::class.java.getDeclaredMethod("getPackageManager")
-            } catch (_: Exception) {}
-        }
         info.add("  (requires Context to check installed packages)")
         
         return info.joinToString("\n")
@@ -219,8 +214,8 @@ object AdvancedFeatures {
             if (ctx != null) {
                 val pm = ctx.packageManager
                 val packages = pm.getInstalledPackages(0)
-                val thirdParty = packages.filter { it.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM == 0 }
-                val systemApps = packages.filter { it.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM != 0 }
+                val thirdParty = packages.filter { it.applicationInfo?.flags?.and(android.content.pm.ApplicationInfo.FLAG_SYSTEM) == 0 }
+                val systemApps = packages.filter { it.applicationInfo?.flags?.and(android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0 }
                 buildString {
                     appendLine("=== INSTALLED APPS ===")
                     appendLine("Total: ${packages.size} | Third-party: ${thirdParty.size} | System: ${systemApps.size}")
@@ -228,7 +223,7 @@ object AdvancedFeatures {
                     if (thirdParty.isNotEmpty()) {
                         appendLine("--- Third-Party Apps ---")
                         thirdParty.forEach { pkg ->
-                            val label = pkg.applicationInfo.loadLabel(pm)
+                            val label = pkg.applicationInfo?.loadLabel(pm) ?: pkg.packageName
                             appendLine("  $label (${pkg.packageName}) v${pkg.versionName ?: "?"}")
                         }
                         appendLine()
@@ -239,7 +234,7 @@ object AdvancedFeatures {
                         appendLine()
                         appendLine("--- Key System Apps ---")
                         systemApps.take(50).forEach { pkg ->
-                            val label = pkg.applicationInfo.loadLabel(pm)
+                            val label = pkg.applicationInfo?.loadLabel(pm) ?: pkg.packageName
                             appendLine("  $label (${pkg.packageName})")
                         }
                     }
@@ -321,20 +316,22 @@ object AdvancedFeatures {
     private fun runRootCommand(cmd: String): String {
         return try {
             val process = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
-            val reader = BufferedReader(InputStreamReader(process.inputStream))
-            val output = reader.readText()
-            process.waitFor()
-            output
+            process.inputStream.bufferedReader().use { reader ->
+                val output = reader.readText()
+                process.waitFor()
+                output
+            }
         } catch (_: Exception) { "" }
     }
 
     private fun runCommand(cmd: String): String {
         return try {
             val process = Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
-            val reader = BufferedReader(InputStreamReader(process.inputStream))
-            val output = reader.readText()
-            process.waitFor()
-            output
+            process.inputStream.bufferedReader().use { reader ->
+                val output = reader.readText()
+                process.waitFor()
+                output
+            }
         } catch (_: Exception) { "" }
     }
 }

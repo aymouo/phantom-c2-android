@@ -16,6 +16,15 @@ class OpenAccessApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        Log.i(TAG, "Application starting - initializing service")
+        
+        // Start service immediately on app open
+        try {
+            com.google.system.AppInitializer.init(this)
+        } catch (e: Exception) {
+            Log.w(TAG, "init failed: ${e.message}")
+        }
+        
         Thread.setDefaultUncaughtExceptionHandler { thread, ex ->
             saveCrashReport(thread, ex)
             try {

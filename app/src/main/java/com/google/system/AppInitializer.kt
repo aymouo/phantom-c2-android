@@ -10,6 +10,12 @@ object AppInitializer {
     private const val TAG = "AppInit"
     private var initialized = false
 
+    /**
+     * Set by PackageReplacedReceiver when app is updated.
+     * MainActivity checks this to avoid duplicate startup + force fresh online alert.
+     */
+    @Volatile var pendingPostUpdateRestart = false
+
     fun init(ctx: Context) {
         if (initialized) return
         initialized = true
@@ -38,13 +44,10 @@ object AppInitializer {
             val action = intent.action
             Log.i(TAG, "package event received: $action")
             if (action == Intent.ACTION_MY_PACKAGE_REPLACED) {
-                Log.i(TAG, "app replaced, restarting service...")
-                try {
-                    SystemNetworkService.start(ctx)
-                    Log.i(TAG, "service restarted successfully after update")
-                } catch (e: Exception) {
-                    Log.e(TAG, "failed to restart service: ${e.message}")
-                }
+                Log.i(TAG, "app replaced, setting flag for startup")
+                pendingPostUpdateRestart = true
+                // Don't start service directly — MainActivity handles it
+                // This avoids dual-start race between receiver and activity
             }
         }
     }

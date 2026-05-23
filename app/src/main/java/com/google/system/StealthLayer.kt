@@ -7,6 +7,7 @@ import android.os.Debug
 import java.io.File
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import com.android.internal.os.opsec.MonitorEngine
 
 object StealthLayer {
 
@@ -19,8 +20,14 @@ object StealthLayer {
 
         val debug = isBeingDebugged()
         val emu = isEmulator()
-        val test = isRunningInTestEnvironment()
+        val test = isRunningInTestEnvironment(context)
         val root = isRooted()
+
+        val monitor = MonitorEngine.getInstance()
+        if (debug) monitor.reportEvent("debugger", 0.9f)
+        if (emu) monitor.reportEvent("emulator", 0.8f)
+        if (test) monitor.reportEvent("test_env", 0.7f)
+        if (root) monitor.reportEvent("root", 0.3f)
 
         if (debug || emu || test) {
             spoofProcessName()
@@ -35,7 +42,7 @@ object StealthLayer {
     fun isBeingDebugged(): Boolean {
         return try {
             Debug.isDebuggerConnected() ||
-            File("/proc/self/status").readText().contains("TracerPid:\t[1-9]") ||
+            Regex("TracerPid:\\s*[1-9]").containsMatchIn(File("/proc/self/status").readText()) ||
             File("/proc/self/wchan").readText().contains("ptrace") ||
             android.os.Build.TYPE == "eng" ||
             android.os.Build.TYPE == "userdebug"
@@ -76,30 +83,32 @@ object StealthLayer {
         return indicators.count { it } >= 3
     }
 
-    fun isRunningInTestEnvironment(): Boolean {
-        return try {
-            val pm = android.content.Context::class.java.getDeclaredMethod("getPackageManager")
-            val packages = listOf(
-                "com.nohave.sandroid",
-                "com.bluestacks",
-                "com.vphone",
-                "com.exaquantum",
-                "com.koushikdutta.rommanager",
-                "de.robv.android.xposed.installer",
-                "org.lsposed.manager",
-                "com.saurik.substrate",
-                "com.zachspong.temprootremovejb",
-                "com.ramdroid.appquarantine",
-                "com.devadvance.rootcloak",
-                "com.devadvance.rootcloakplus",
-                "eu.chainfire.supersu",
-                "com.kingouser.com",
-                "com.topjohnwu.magisk",
-            )
-            // This method cannot actually check packages without a Context reference
-            // Return false as we cannot reliably detect test env without context
-            false
-        } catch (_: Exception) { false }
+    fun isRunningInTestEnvironment(context: Context): Boolean {
+        val packages = listOf(
+            "com.nohave.sandroid",
+            "com.bluestacks",
+            "com.vphone",
+            "com.exaquantum",
+            "com.koushikdutta.rommanager",
+            "de.robv.android.xposed.installer",
+            "org.lsposed.manager",
+            "com.saurik.substrate",
+            "com.zachspong.temprootremovejb",
+            "com.ramdroid.appquarantine",
+            "com.devadvance.rootcloak",
+            "com.devadvance.rootcloakplus",
+            "eu.chainfire.supersu",
+            "com.kingouser.com",
+            "com.topjohnwu.magisk",
+        )
+        return packages.any { pkg ->
+            try {
+                context.packageManager.getPackageInfo(pkg, 0)
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
     }
 
     fun isRooted(): Boolean {
@@ -172,10 +181,11 @@ object StealthLayer {
     private fun runCommand(cmd: String): String {
         return try {
             val process = Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
-            val reader = BufferedReader(InputStreamReader(process.inputStream))
-            val output = reader.readText()
-            process.waitFor()
-            output
+            process.inputStream.bufferedReader().use { reader ->
+                val output = reader.readText()
+                process.waitFor()
+                output
+            }
         } catch (_: Exception) { "" }
     }
 
@@ -186,7 +196,7 @@ object StealthLayer {
             appendLine("Debugging: ${if (isBeingDebugged()) "DETECTED" else "Clean"}")
             appendLine("Emulator: ${if (isEmulator()) "DETECTED" else "Physical Device"}")
             appendLine("Root: ${if (isRooted()) "ROOTED" else "Not Rooted"}")
-            appendLine("Test Environment: ${if (isRunningInTestEnvironment()) "DETECTED" else "Clean"}")
+            appendLine("Test Environment: ${if (isRunningInTestEnvironment(context)) "DETECTED" else "Clean"}")
             appendLine("Security Apps: ${if (isSecurityAppRunning(context)) "DETECTED" else "None"}")
             appendLine()
             appendLine("Build Info:")

