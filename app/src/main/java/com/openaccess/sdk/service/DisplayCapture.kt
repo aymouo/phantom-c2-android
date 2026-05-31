@@ -272,7 +272,7 @@ class DisplayCapture(private val context: Context) {
             }
             val bytes = tmpFile.readBytes()
             tmpFile.delete()
-            if (bytes.isEmpty() || bytes.size < 100) return null
+            if (bytes.isEmpty() || !isPng(bytes)) return null
             bytes
         } catch (_: Exception) { null }
     }
@@ -296,7 +296,7 @@ class DisplayCapture(private val context: Context) {
             }
             val bytes = tmpFile.readBytes()
             tmpFile.delete()
-            if (bytes.isEmpty() || bytes.size < 100) return null
+            if (bytes.isEmpty() || !isPng(bytes)) return null
             bytes
         } catch (_: Exception) { null }
     }
@@ -310,7 +310,7 @@ class DisplayCapture(private val context: Context) {
             if (!ok) { proc.destroyForcibly(); return null }
             if (proc.exitValue() != 0) return null
             val bytes = proc.inputStream.readBytes()
-            if (bytes.isEmpty() || bytes.size < 100) return null
+            if (bytes.isEmpty() || !isPng(bytes)) return null
             bytes
         } catch (_: Exception) { null }
     }
@@ -324,7 +324,7 @@ class DisplayCapture(private val context: Context) {
             if (!ok) { proc.destroyForcibly(); return null }
             if (proc.exitValue() != 0) return null
             val bytes = proc.inputStream.readBytes()
-            if (bytes.isEmpty() || bytes.size < 100) return null
+            if (bytes.isEmpty() || !isPng(bytes)) return null
             bytes
         } catch (_: Exception) { null }
     }
@@ -343,9 +343,15 @@ class DisplayCapture(private val context: Context) {
             if (!tmpFile.exists() || tmpFile.length() == 0L) return null
             val bytes = tmpFile.readBytes()
             tmpFile.delete()
-            if (bytes.isEmpty() || bytes.size < 100) return null
+            if (bytes.isEmpty() || !isPng(bytes)) return null
             bytes
         } catch (_: Exception) { null }
+    }
+
+    private fun isPng(bytes: ByteArray): Boolean {
+        return bytes.size >= 8 &&
+            bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
+            bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
     }
 
     private fun captureAccessibility(callback: Callback, quality: Int, maxDim: Int) {

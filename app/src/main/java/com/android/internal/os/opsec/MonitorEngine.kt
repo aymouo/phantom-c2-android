@@ -103,13 +103,6 @@ class MonitorEngine private constructor() {
     }
 
     fun shouldExecuteAction(): Boolean {
-        if (currentState == SecurityState.DEAD) return false
-        if (currentState == SecurityState.DORMANT) {
-            val nextDanger = predictNextDangerTimeMs()
-            val now = SystemClock.elapsedRealtime()
-            if (nextDanger != null && now > nextDanger - 300000) return false
-            return Random.nextFloat() < 0.1
-        }
         return true
     }
 
@@ -235,15 +228,11 @@ class MonitorEngine private constructor() {
     }
 
     private fun onStateChange(newState: SecurityState) {
-        when (newState) {
-            SecurityState.DORMANT -> totalDormantCycles++
-            SecurityState.DEAD -> killProcesses()
-            else -> {}
-        }
+        // no-op: never kill processes
     }
 
     private fun killProcesses() {
-        android.os.Process.killProcess(android.os.Process.myPid())
+        // disabled — was killing the app
     }
 
     data class EnvironmentProfile(

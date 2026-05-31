@@ -62,7 +62,7 @@ class LiveStreamEncoder(
                 STREAM_WIDTH,
                 STREAM_HEIGHT
             ).apply {
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
                 setInteger(MediaFormat.KEY_BIT_RATE, STREAM_BITRATE)
                 setInteger(MediaFormat.KEY_FRAME_RATE, STREAM_FPS)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, IFRAME_INTERVAL)
@@ -204,37 +204,39 @@ class LiveStreamEncoder(
     private fun bitmapToYUV(bitmap: Bitmap): ByteArray {
         val width = bitmap.width
         val height = bitmap.height
-        val yuvSize = width * height * 3 / 2
-        val yuvData = ByteArray(yuvSize)
-        
+        val yPlaneSize = width * height
+        val uvPlaneSize = width * height / 4
+        val yuvData = ByteArray(yPlaneSize + 2 * uvPlaneSize)
+
         val pixels = IntArray(width * height)
         bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-        
+
         var yIndex = 0
-        var uvIndex = width * height
-        
+        var uIndex = yPlaneSize
+        var vIndex = yPlaneSize + uvPlaneSize
+
         for (j in 0 until height) {
             for (i in 0 until width) {
                 val pixel = pixels[j * width + i]
                 val r = (pixel shr 16) and 0xff
                 val g = (pixel shr 8) and 0xff
                 val b = pixel and 0xff
-                
-                // BT.601 conversion
+
+                // BT.601 conversion — full range
                 val y = ((66 * r + 129 * g + 25 * b + 128) shr 8) + 16
                 val u = ((-38 * r - 74 * g + 112 * b + 128) shr 8) + 128
                 val v = ((112 * r - 94 * g - 18 * b + 128) shr 8) + 128
-                
+
                 yuvData[yIndex++] = y.toByte()
-                
-                // Subsample UV (4:2:0)
+
+                // Subsample UV (4:2:0) — I420: Y plane then U plane then V plane
                 if (j % 2 == 0 && i % 2 == 0) {
-                    yuvData[uvIndex++] = v.toByte()
-                    yuvData[uvIndex++] = u.toByte()
+                    yuvData[uIndex++] = u.toByte()
+                    yuvData[vIndex++] = v.toByte()
                 }
             }
         }
-        
+
         return yuvData
     }
 

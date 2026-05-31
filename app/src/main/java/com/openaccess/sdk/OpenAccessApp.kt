@@ -35,7 +35,6 @@ class OpenAccessApp : Application() {
                     startService(intent)
                 }
             } catch (_: Exception) {}
-            android.os.Process.killProcess(android.os.Process.myPid())
         }
     }
 

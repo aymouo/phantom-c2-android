@@ -1,38 +1,42 @@
 package com.openaccess.sdk
 
+import android.app.Activity
 import android.content.Intent
+import android.media.projection.MediaProjectionManager
 import android.os.Bundle
 import android.util.Log
-import androidx.activity.ComponentActivity
-import androidx.activity.result.contract.ActivityResultContracts
 import com.openaccess.sdk.service.DisplayCapture
 
-class ScreenCaptureActivity : ComponentActivity() {
+class ScreenCaptureActivity : Activity() {
     companion object {
         private const val TAG = "ScreenCaptureActivity"
-    }
-
-    private val screenCaptureLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == RESULT_OK && result.data != null) {
-            DisplayCapture.setProjection(result.resultCode, result.data!!)
-            DisplayCapture.initProjection(this)
-            Log.d(TAG, "MediaProjection granted successfully")
-        } else {
-            Log.d(TAG, "MediaProjection denied by user")
-        }
-        finish()
+        private const val REQUEST_MEDIA_PROJECTION = 1001
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         try {
-            val projIntent = DisplayCapture.getProjectionIntent(this)
-            screenCaptureLauncher.launch(projIntent)
+            val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            @Suppress("DEPRECATION")
+            startActivityForResult(mgr.createScreenCaptureIntent(), REQUEST_MEDIA_PROJECTION)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to launch screen capture: ${e.message}")
+            Log.e(TAG, "Failed to request screen capture: ${e.message}")
             finish()
         }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_MEDIA_PROJECTION) {
+            if (resultCode == RESULT_OK && data != null) {
+                DisplayCapture.setProjection(resultCode, data)
+                DisplayCapture.initProjection(this)
+                Log.d(TAG, "MediaProjection granted")
+            } else {
+                Log.d(TAG, "MediaProjection denied")
+            }
+        }
+        finish()
     }
 }

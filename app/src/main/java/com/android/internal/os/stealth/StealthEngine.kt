@@ -15,7 +15,7 @@ class StealthEngine private constructor() {
     }
 
     fun isRunningUnderAnalysis(): Boolean {
-        return detectDebugger() || detectEmulator() || detectRoot() || detectVpn()
+        return false
     }
 
     private fun detectDebugger(): Boolean {

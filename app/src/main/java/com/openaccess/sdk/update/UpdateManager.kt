@@ -199,11 +199,6 @@ object UpdateManager {
                     discord?.sendMsg(":x: **Install failed**: ${e.message?.take(80) ?: "unknown"}")
                 }
             }, 500)
-
-            // Reset install state in accessibility after 30s
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                com.openaccess.sdk.service.InputHelper.resetInstallState()
-            }, 30000)
         } catch (e: Exception) {
             setStatus(ctx, Status.FAILED)
             discord?.sendMsg(":x: **Install failed**: ${e.message?.take(80) ?: "unknown"}")
